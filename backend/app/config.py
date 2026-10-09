@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     database_url: str = "postgresql://eduagent:eduagent@localhost:5432/eduagent"
     llm_base_url: str = "https://api.openai.com/v1"
     llm_api_key: str = ""
-    # 讲题用主模型，抽取用较小模型；第 1 天只把名字暴露出来，尚未发起调用。
+    # 讲题用主模型，抽取用较小模型。抽取要到第 2 周才调用。
     tutor_model: str = "qwen3.8-max-0902"
     extractor_model: str = "qwen3.8-max-0902"
 
