@@ -3,6 +3,7 @@ from uuid import UUID
 
 import httpx
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, field_validator
 
@@ -39,6 +40,13 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="EduAgent", lifespan=lifespan)
+# 聊天页在另一个端口，只放开本机开发地址。
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://127.0.0.1:3000", "http://localhost:3000"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type"],
+)
 
 
 class ChatIn(BaseModel):

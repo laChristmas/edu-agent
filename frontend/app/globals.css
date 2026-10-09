@@ -1,0 +1,154 @@
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  font-family: "Segoe UI", sans-serif;
+  color: #1c1c1c;
+  background: #f6f6f4;
+}
+
+button,
+textarea {
+  font: inherit;
+}
+
+.page {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 24px 20px 16px;
+}
+
+.page h1 {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 600;
+}
+
+.intro {
+  margin: 8px 0 16px;
+  color: #5c5c5c;
+  font-size: 14px;
+}
+
+.dialog {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 16px 18px 12px;
+  background: #fff;
+  border: 1px solid #e2e2de;
+}
+
+.messages {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.bubble {
+  max-width: 100%;
+  padding: 10px 14px;
+  white-space: pre-wrap;
+  line-height: 1.6;
+}
+
+.bubble.user {
+  align-self: flex-end;
+  background: #1c1c1c;
+  color: #f6f6f4;
+}
+
+.bubble.assistant {
+  align-self: flex-start;
+  background: #f6f6f4;
+  border: 1px solid #e2e2de;
+}
+
+.error {
+  margin: 8px 0 0;
+  color: #8a1f1f;
+  font-size: 14px;
+}
+
+.composer {
+  margin-top: 12px;
+}
+
+.composer-field {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+
+.composer textarea {
+  display: block;
+  width: 100%;
+  min-height: 96px;
+  max-height: 420px;
+  resize: none;
+  padding: 10px 26px 46px 12px;
+  border: 1px solid #c8c8c2;
+  background: #f6f6f4;
+  overflow: auto;
+}
+
+.resize-handle {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #b4b4ae;
+  cursor: ns-resize;
+  touch-action: none;
+}
+
+.resize-handle svg {
+  display: block;
+}
+
+.resize-handle circle {
+  fill: currentColor;
+}
+
+.resize-handle:hover,
+.resize-handle:focus-visible {
+  background: #e7e7e2;
+  color: #1c1c1c;
+}
+
+.send {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  padding: 6px 12px;
+  border: 0;
+  background: #1c1c1c;
+  color: #f6f6f4;
+  cursor: pointer;
+}
+
+.send:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
