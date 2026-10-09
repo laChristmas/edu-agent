@@ -17,6 +17,7 @@ from app.chat import (
     sse,
     stream_tutor,
 )
+from app.tutor import tutor_messages
 from app.config import get_settings
 from app.db import create_pool, ensure_schema, pgvector_version
 
@@ -94,7 +95,7 @@ async def chat(body: ChatIn):
         assistant_saved = False
         try:
             await save_message(pool, conversation_id, "user", body.content)
-            messages = await load_messages(pool, conversation_id)
+            messages = tutor_messages(await load_messages(pool, conversation_id))
             yield sse({"type": "conversation", "id": str(conversation_id)})
             async for delta in stream_tutor(app.state.http, settings, messages):
                 parts.append(delta)

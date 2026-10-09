@@ -76,7 +76,7 @@ async def save_message(
 
 
 async def load_messages(pool: asyncpg.Pool, conversation_id: UUID) -> list[dict[str, str]]:
-    """读出本会话已落库的消息。最近 12 轮的截断留到第 3 天。"""
+    """按时间读出本会话已落库的消息。截断最近 12 轮在送给模型时做。"""
     async with pool.acquire() as connection:
         rows = await connection.fetch(
             """
