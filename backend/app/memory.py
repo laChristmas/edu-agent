@@ -21,6 +21,8 @@ KEY_ORDER = {name: list(keys) for name, keys in _PROFILE["keys"].items()}
 FIXED_KEYS = {name: frozenset(keys) for name, keys in KEY_ORDER.items()}
 SECTION_ORDER = ("身份", "目标", "偏好", "兴趣", "学情")
 MANUAL_CONFIDENCE = 0.9
+MIN_CONFIDENCE = Decimal(str(_PROFILE["min_confidence"]))
+SNAPSHOT_PER_DIMENSION = int(_PROFILE["snapshot_per_dimension"])
 EXAM_GROUPS = list(_PROFILE["exam_groups"])
 DEFAULT_TIMEZONE = str(_PROFILE["default_timezone"])
 _TIME_KEYS = {group["time_key"] for group in EXAM_GROUPS}
@@ -179,6 +181,40 @@ async def upsert_fact(
                 ends_on,
             )
             return FactWrite(applied=True, fact_id=fact_id)
+
+
+async def teaching_facts(pool: asyncpg.Pool, user_id: UUID) -> list[dict[str, str]]:
+    """取出可以改讲法的画像。失效、已结束，以及置信度不够的行都不进入讲法。"""
+    rows = await pool.fetch(
+        """
+        SELECT dimension, fact_key, value
+        FROM profile_facts
+        WHERE user_id = $1 AND status = '有效' AND confidence >= $2
+        ORDER BY created_at DESC
+        """,
+        user_id,
+        MIN_CONFIDENCE,
+    )
+    chosen: dict[str, list] = {dimension: [] for dimension in SECTION_ORDER}
+    for row in rows:
+        bucket = chosen.get(row["dimension"])
+        if bucket is None or len(bucket) >= SNAPSHOT_PER_DIMENSION:
+            continue
+        bucket.append(row)
+
+    facts: list[dict[str, str]] = []
+    for dimension in SECTION_ORDER:
+        order = KEY_ORDER.get(dimension, [])
+
+        def sort_key(row, order=order):
+            key = row["fact_key"]
+            if key in order:
+                return (0, order.index(key))
+            return (1, key)
+
+        for row in sorted(chosen[dimension], key=sort_key):
+            facts.append({"dimension": dimension, "key": row["fact_key"], "value": row["value"]})
+    return facts
 
 
 async def list_profile(pool: asyncpg.Pool, user_id: UUID) -> list[dict]:

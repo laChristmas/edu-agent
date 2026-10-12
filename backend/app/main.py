@@ -24,7 +24,7 @@ from app.tutor import tutor_messages
 from app.config import get_settings
 from app.db import LOCAL_USER_ID, create_pool, ensure_schema, pgvector_version
 from app.extract import extract_turn
-from app.memory import confirm_facts, list_profile
+from app.memory import confirm_facts, list_profile, teaching_facts
 
 logger = logging.getLogger("eduagent")
 
@@ -164,7 +164,8 @@ async def chat(body: ChatIn):
         user_message_id = None
         try:
             user_message_id = await save_message(pool, conversation_id, "user", body.content)
-            messages = tutor_messages(await load_messages(pool, conversation_id))
+            facts = await teaching_facts(pool, LOCAL_USER_ID)
+            messages = tutor_messages(await load_messages(pool, conversation_id), facts)
             yield sse({"type": "conversation", "id": str(conversation_id)})
             async for delta in stream_tutor(app.state.http, settings, messages):
                 parts.append(delta)

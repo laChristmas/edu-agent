@@ -8,6 +8,7 @@ with _CONFIG_PATH.open("rb") as config_file:
 
 RECENT_ROUNDS = int(_RULES["recent_rounds"])
 TUTOR_PROMPT = str(_RULES["tutor_prompt"]).strip()
+SNAPSHOT_PROMPT = str(_RULES["snapshot_prompt"]).strip()
 
 
 def recent_rounds(messages: list[dict[str, str]], limit: int = RECENT_ROUNDS) -> list[dict[str, str]]:
@@ -18,6 +19,13 @@ def recent_rounds(messages: list[dict[str, str]], limit: int = RECENT_ROUNDS) ->
     return messages[user_indexes[-limit] :]
 
 
-def tutor_messages(history: list[dict[str, str]]) -> list[dict[str, str]]:
-    """家教提示放在最前，不写入会话表。"""
-    return [{"role": "system", "content": TUTOR_PROMPT}, *recent_rounds(history)]
+def tutor_messages(
+    history: list[dict[str, str]],
+    facts: list[dict[str, str]] | None = None,
+) -> list[dict[str, str]]:
+    """家教提示放在最前，并附上够格的画像。这段提示不写入会话表。"""
+    content = TUTOR_PROMPT
+    if facts:
+        lines = [f"{fact['dimension']}：{fact['key']}={fact['value']}" for fact in facts]
+        content = f"{TUTOR_PROMPT}\n\n{SNAPSHOT_PROMPT}\n" + "\n".join(lines)
+    return [{"role": "system", "content": content}, *recent_rounds(history)]
