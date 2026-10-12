@@ -20,7 +20,8 @@ from app.chat import (
 )
 from app.tutor import tutor_messages
 from app.config import get_settings
-from app.db import create_pool, ensure_schema, pgvector_version
+from app.db import LOCAL_USER_ID, create_pool, ensure_schema, pgvector_version
+from app.memory import confirm_facts, list_profile
 
 
 @asynccontextmanager
@@ -47,6 +48,16 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["Content-Type"],
 )
+
+
+class ProfileFactIn(BaseModel):
+    dimension: str
+    key: str
+    value: str
+
+
+class ProfileIn(BaseModel):
+    facts: list[ProfileFactIn]
 
 
 class ChatIn(BaseModel):
@@ -77,6 +88,26 @@ async def health():
             "api_key_configured": bool(settings.llm_api_key),
         },
     }
+
+
+@app.get("/profile")
+async def profile():
+    """返回本地用户仍有效的画像。固定键即使还没写过也会留出空栏。"""
+    return {"sections": await list_profile(app.state.pool, LOCAL_USER_ID)}
+
+
+@app.post("/profile")
+async def save_profile(body: ProfileIn):
+    """用户在界面里确认后写入。原话按 0.9 记，清空的项标成失效。"""
+    try:
+        await confirm_facts(
+            app.state.pool,
+            LOCAL_USER_ID,
+            [(fact.dimension, fact.key, fact.value) for fact in body.facts],
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=str(error)) from None
+    return {"sections": await list_profile(app.state.pool, LOCAL_USER_ID)}
 
 
 @app.get("/conversations/{conversation_id}/messages")

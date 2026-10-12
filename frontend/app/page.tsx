@@ -2,6 +2,8 @@
 
 import { FormEvent, PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from "react";
 
+import ProfilePanel from "./profile-panel";
+
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:8000";
 const CONVERSATION_KEY = "eduagent.conversation_id";
 
@@ -27,6 +29,7 @@ export default function ChatPage() {
   const [error, setError] = useState("");
   const [inputHeight, setInputHeight] = useState(96);
   const [restoring, setRestoring] = useState(true);
+  const [profileOpen, setProfileOpen] = useState(false);
   const resizeDrag = useRef<{ y: number; height: number } | null>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
 
@@ -200,14 +203,19 @@ export default function ChatPage() {
           <h1>EduAgent</h1>
           <p className="intro">一个对话里的学习助手。全学科问答、错题和复习，都从这句话开始。</p>
         </div>
-        <button
-          type="button"
-          className="new-chat"
-          onClick={startNew}
-          disabled={sending || restoring || (!conversationId && messages.length === 0)}
-        >
-          新会话
-        </button>
+        <div className="top-actions">
+          <button type="button" className="new-chat" onClick={() => setProfileOpen(true)}>
+            用户信息
+          </button>
+          <button
+            type="button"
+            className="new-chat"
+            onClick={startNew}
+            disabled={sending || restoring || (!conversationId && messages.length === 0)}
+          >
+            新会话
+          </button>
+        </div>
       </div>
       <section className="dialog" aria-label="对话">
         <div className="messages" ref={messagesRef}>
@@ -264,6 +272,7 @@ export default function ChatPage() {
           </div>
         </form>
       </section>
+      {profileOpen ? <ProfilePanel onClose={() => setProfileOpen(false)} /> : null}
     </main>
   );
 }

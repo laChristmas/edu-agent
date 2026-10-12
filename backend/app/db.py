@@ -31,13 +31,44 @@ CREATE TABLE IF NOT EXISTS messages (
 
 CREATE INDEX IF NOT EXISTS messages_conversation_created_idx
     ON messages (conversation_id, created_at);
+
+-- 旧行留着，标成失效，方便以后解释当时为什么这么讲。
+-- 同一用户、同一维度、同一个键，同时只能有一行有效。
+CREATE TABLE IF NOT EXISTS profile_facts (
+    id uuid PRIMARY KEY,
+    user_id uuid NOT NULL REFERENCES users (id),
+    dimension text NOT NULL CHECK (dimension IN ('身份', '目标', '兴趣', '偏好', '学情')),
+    fact_key text NOT NULL CHECK (length(btrim(fact_key)) > 0),
+    value text NOT NULL CHECK (length(btrim(value)) > 0),
+    confidence numeric(3, 2) NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
+    source_message_id uuid REFERENCES messages (id),
+    status text NOT NULL CHECK (status IN ('有效', '失效', '已结束')),
+    ends_on date,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    superseded_at timestamptz
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS profile_facts_active_key_idx
+    ON profile_facts (user_id, dimension, fact_key)
+    WHERE status = '有效';
 """
 
 
 async def ensure_schema(pool: asyncpg.Pool) -> None:
-    """建会话相关的表，并保证本地用户只有一行。"""
+    """建会话和画像表，并保证本地用户只有一行。"""
     async with pool.acquire() as connection:
         await connection.execute(SCHEMA)
+        # 已有库补上考试日期，并把「已结束」放进状态约束。
+        await connection.execute("ALTER TABLE profile_facts ADD COLUMN IF NOT EXISTS ends_on date")
+        await connection.execute(
+            "ALTER TABLE profile_facts DROP CONSTRAINT IF EXISTS profile_facts_status_check"
+        )
+        await connection.execute(
+            """
+            ALTER TABLE profile_facts ADD CONSTRAINT profile_facts_status_check
+            CHECK (status IN ('有效', '失效', '已结束'))
+            """
+        )
         await connection.execute(
             """
             INSERT INTO users (id, display_name)
