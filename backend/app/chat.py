@@ -61,18 +61,21 @@ async def save_message(
     conversation_id: UUID,
     role: str,
     content: str,
-) -> None:
+) -> UUID:
+    """写入一条消息并返回编号，供抽取时标明来源。"""
+    message_id = uuid4()
     async with pool.acquire() as connection:
         await connection.execute(
             """
             INSERT INTO messages (id, conversation_id, role, content)
             VALUES ($1, $2, $3, $4)
             """,
-            uuid4(),
+            message_id,
             conversation_id,
             role,
             content,
         )
+    return message_id
 
 
 async def load_messages(pool: asyncpg.Pool, conversation_id: UUID) -> list[dict[str, str]]:

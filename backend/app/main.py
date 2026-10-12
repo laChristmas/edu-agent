@@ -1,3 +1,5 @@
+import asyncio
+import logging
 from contextlib import asynccontextmanager
 from uuid import UUID
 
@@ -21,7 +23,10 @@ from app.chat import (
 from app.tutor import tutor_messages
 from app.config import get_settings
 from app.db import LOCAL_USER_ID, create_pool, ensure_schema, pgvector_version
+from app.extract import extract_turn
 from app.memory import confirm_facts, list_profile
+
+logger = logging.getLogger("eduagent")
 
 
 @asynccontextmanager
@@ -30,6 +35,7 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     app.state.settings = settings
     app.state.pool = await create_pool(settings)
+    app.state.tasks = set()
     await ensure_schema(app.state.pool)
     # 读超时放宽，流式回复可能持续较久。
     app.state.http = httpx.AsyncClient(timeout=httpx.Timeout(10.0, read=180.0))
@@ -41,6 +47,19 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="EduAgent", lifespan=lifespan)
+
+
+def _spawn(coro) -> None:
+    """把回复后的抽取放到当前事件循环里，不占用正在返回的流。"""
+    task = asyncio.create_task(coro)
+    app.state.tasks.add(task)
+
+    def _finished(done: asyncio.Task) -> None:
+        app.state.tasks.discard(done)
+        if not done.cancelled() and done.exception() is not None:
+            logger.error("后台任务失败", exc_info=done.exception())
+
+    task.add_done_callback(_finished)
 # 聊天页在另一个端口，只放开本机开发地址。
 app.add_middleware(
     CORSMiddleware,
@@ -142,8 +161,9 @@ async def chat(body: ChatIn):
     async def events():
         parts: list[str] = []
         assistant_saved = False
+        user_message_id = None
         try:
-            await save_message(pool, conversation_id, "user", body.content)
+            user_message_id = await save_message(pool, conversation_id, "user", body.content)
             messages = tutor_messages(await load_messages(pool, conversation_id))
             yield sse({"type": "conversation", "id": str(conversation_id)})
             async for delta in stream_tutor(app.state.http, settings, messages):
@@ -160,5 +180,18 @@ async def chat(body: ChatIn):
                     await save_message(pool, conversation_id, "assistant", "".join(parts))
             finally:
                 await end_turn(conversation_id)
+                # 抽取在回复落库之后另起任务，不占这条流式连接。
+                if user_message_id is not None and parts:
+                    _spawn(
+                        extract_turn(
+                            pool,
+                            app.state.http,
+                            settings,
+                            user_id=LOCAL_USER_ID,
+                            user_message_id=user_message_id,
+                            user_text=body.content,
+                            assistant_text="".join(parts),
+                        )
+                    )
 
     return StreamingResponse(events(), media_type="text/event-stream")
