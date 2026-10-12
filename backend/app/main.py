@@ -24,7 +24,7 @@ from app.tutor import tutor_messages
 from app.config import get_settings
 from app.db import LOCAL_USER_ID, create_pool, ensure_schema, pgvector_version
 from app.extract import extract_turn
-from app.memory import confirm_facts, list_profile, teaching_facts
+from app.memory import active_facts, confirm_facts, list_profile, teaching_facts
 
 logger = logging.getLogger("eduagent")
 
@@ -165,7 +165,14 @@ async def chat(body: ChatIn):
         try:
             user_message_id = await save_message(pool, conversation_id, "user", body.content)
             facts = await teaching_facts(pool, LOCAL_USER_ID)
-            messages = tutor_messages(await load_messages(pool, conversation_id), facts)
+            archive = await active_facts(pool, LOCAL_USER_ID)
+            ask_grade = not any(fact["dimension"] == "身份" and fact["key"] == "年级" for fact in archive)
+            messages = tutor_messages(
+                await load_messages(pool, conversation_id),
+                facts,
+                archive,
+                ask_grade=ask_grade,
+            )
             yield sse({"type": "conversation", "id": str(conversation_id)})
             async for delta in stream_tutor(app.state.http, settings, messages):
                 parts.append(delta)

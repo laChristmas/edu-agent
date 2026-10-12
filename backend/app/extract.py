@@ -8,7 +8,7 @@ import asyncpg
 import httpx
 
 from app.config import Settings
-from app.memory import KEY_ORDER, upsert_fact
+from app.memory import KEY_ORDER, invalidate_fact, upsert_fact
 
 logger = logging.getLogger("eduagent.extract")
 
@@ -31,21 +31,30 @@ async def extract_turn(
 ) -> None:
     """回复落库后抽取这一轮的画像。失败只记日志，不反过来影响已经发出的讲解。"""
     try:
-        facts = await _request_facts(pool, client, settings, user_id, user_text, assistant_text)
+        facts, forgets = await _request_changes(pool, client, settings, user_id, user_text, assistant_text)
+        written: set[tuple[str, str]] = set()
         for fact in facts:
-            await _store_fact(pool, user_id, user_message_id, fact)
+            if await _store_fact(pool, user_id, user_message_id, fact):
+                written.add((str(fact.get("dimension") or "").strip(), str(fact.get("key") or "").strip()))
+        # 同一轮又改口又被误放进忘记时，保留刚写下的新值。
+        for item in forgets:
+            dimension = str(item.get("dimension") or "").strip()
+            key = str(item.get("key") or "").strip()
+            if (dimension, key) in written:
+                continue
+            await _forget_fact(pool, user_id, dimension, key)
     except Exception:
         logger.exception("画像抽取失败")
 
 
-async def _request_facts(
+async def _request_changes(
     pool: asyncpg.Pool,
     client: httpx.AsyncClient,
     settings: Settings,
     user_id: UUID,
     user_text: str,
     assistant_text: str,
-) -> list[dict]:
+) -> tuple[list[dict], list[dict]]:
     rows = await pool.fetch(
         """
         SELECT dimension, fact_key, value FROM profile_facts
@@ -83,10 +92,13 @@ async def _request_facts(
         raise RuntimeError(f"抽取接口返回 {response.status_code}: {detail}")
     content = response.json()["choices"][0]["message"]["content"]
     payload = json.loads(_json_text(content))
-    facts = payload.get("facts") if isinstance(payload, dict) else None
-    if not isinstance(facts, list):
-        return []
-    return [fact for fact in facts if isinstance(fact, dict)]
+    if not isinstance(payload, dict):
+        return [], []
+    facts = payload.get("facts")
+    forgets = payload.get("forgets")
+    fact_list = [fact for fact in facts if isinstance(fact, dict)] if isinstance(facts, list) else []
+    forget_list = [item for item in forgets if isinstance(item, dict)] if isinstance(forgets, list) else []
+    return fact_list, forget_list
 
 
 def _json_text(content: str) -> str:
@@ -97,12 +109,31 @@ def _json_text(content: str) -> str:
     return text
 
 
-async def _store_fact(pool: asyncpg.Pool, user_id: UUID, user_message_id: UUID, fact: dict) -> None:
+async def _forget_fact(pool: asyncpg.Pool, user_id: UUID, dimension: str, key: str) -> None:
+    """学生要求忘掉某一项时，只把仍有效的已有键标成失效。"""
+    if not dimension or not key:
+        return
+    current = await pool.fetchval(
+        """
+        SELECT id FROM profile_facts
+        WHERE user_id = $1 AND dimension = $2 AND fact_key = $3 AND status = '有效'
+        """,
+        user_id,
+        dimension,
+        key,
+    )
+    if current is None:
+        logger.info("没有可忘记的画像 %s/%s", dimension, key)
+        return
+    await invalidate_fact(pool, user_id, dimension, key)
+
+
+async def _store_fact(pool: asyncpg.Pool, user_id: UUID, user_message_id: UUID, fact: dict) -> bool:
     dimension = str(fact.get("dimension") or "").strip()
     key = str(fact.get("key") or "").strip()
     value = str(fact.get("value") or "").strip()
     if not dimension or not key or not value:
-        return
+        return False
     explicit = fact.get("explicit")
     confidence = 0.9 if explicit is True or explicit == "true" else 0.6
     current = await pool.fetchval(
@@ -115,9 +146,9 @@ async def _store_fact(pool: asyncpg.Pool, user_id: UUID, user_message_id: UUID, 
         key,
     )
     if current == value:
-        return
+        return False
     try:
-        await upsert_fact(
+        written = await upsert_fact(
             pool,
             user_id=user_id,
             dimension=dimension,
@@ -128,3 +159,5 @@ async def _store_fact(pool: asyncpg.Pool, user_id: UUID, user_message_id: UUID, 
         )
     except ValueError:
         logger.info("跳过无效画像 %s/%s", dimension, key)
+        return False
+    return written.applied

@@ -183,22 +183,12 @@ async def upsert_fact(
             return FactWrite(applied=True, fact_id=fact_id)
 
 
-async def teaching_facts(pool: asyncpg.Pool, user_id: UUID) -> list[dict[str, str]]:
-    """取出可以改讲法的画像。失效、已结束，以及置信度不够的行都不进入讲法。"""
-    rows = await pool.fetch(
-        """
-        SELECT dimension, fact_key, value
-        FROM profile_facts
-        WHERE user_id = $1 AND status = '有效' AND confidence >= $2
-        ORDER BY created_at DESC
-        """,
-        user_id,
-        MIN_CONFIDENCE,
-    )
+def _arrange_facts(rows, limit: int | None) -> list[dict[str, str]]:
+    """按维度和固定键顺序排好。limit 只限制讲法快照，口述档案不截断。"""
     chosen: dict[str, list] = {dimension: [] for dimension in SECTION_ORDER}
     for row in rows:
         bucket = chosen.get(row["dimension"])
-        if bucket is None or len(bucket) >= SNAPSHOT_PER_DIMENSION:
+        if bucket is None or (limit is not None and len(bucket) >= limit):
             continue
         bucket.append(row)
 
@@ -215,6 +205,35 @@ async def teaching_facts(pool: asyncpg.Pool, user_id: UUID) -> list[dict[str, st
         for row in sorted(chosen[dimension], key=sort_key):
             facts.append({"dimension": dimension, "key": row["fact_key"], "value": row["value"]})
     return facts
+
+
+async def teaching_facts(pool: asyncpg.Pool, user_id: UUID) -> list[dict[str, str]]:
+    """取出可以改讲法的画像。失效、已结束，以及置信度不够的行都不进入讲法。"""
+    rows = await pool.fetch(
+        """
+        SELECT dimension, fact_key, value
+        FROM profile_facts
+        WHERE user_id = $1 AND status = '有效' AND confidence >= $2
+        ORDER BY created_at DESC
+        """,
+        user_id,
+        MIN_CONFIDENCE,
+    )
+    return _arrange_facts(rows, SNAPSHOT_PER_DIMENSION)
+
+
+async def active_facts(pool: asyncpg.Pool, user_id: UUID) -> list[dict[str, str]]:
+    """取出全部仍有效的事实，供学生询问档案时口述。低置信度的也在这里，但不拿来改讲法。"""
+    rows = await pool.fetch(
+        """
+        SELECT dimension, fact_key, value
+        FROM profile_facts
+        WHERE user_id = $1 AND status = '有效'
+        ORDER BY created_at DESC
+        """,
+        user_id,
+    )
+    return _arrange_facts(rows, None)
 
 
 async def list_profile(pool: asyncpg.Pool, user_id: UUID) -> list[dict]:
