@@ -35,6 +35,17 @@ export default function ChatPage() {
     localStorage.setItem(CONVERSATION_KEY, id);
   }
 
+  function startNew() {
+    if (sending || restoring) {
+      return;
+    }
+    // 只放下这一段的本地指针。已落库的原文仍留在库里。
+    setMessages([]);
+    setConversationId(null);
+    setError("");
+    localStorage.removeItem(CONVERSATION_KEY);
+  }
+
   useEffect(() => {
     const saved = localStorage.getItem(CONVERSATION_KEY);
     if (!saved) {
@@ -184,13 +195,32 @@ export default function ChatPage() {
 
   return (
     <main className="page">
-      <h1>EduAgent</h1>
-      <p className="intro">一个对话里的学习助手。全学科问答、错题和复习，都从这句话开始。</p>
+      <div className="top">
+        <div>
+          <h1>EduAgent</h1>
+          <p className="intro">一个对话里的学习助手。全学科问答、错题和复习，都从这句话开始。</p>
+        </div>
+        <button
+          type="button"
+          className="new-chat"
+          onClick={startNew}
+          disabled={sending || restoring || (!conversationId && messages.length === 0)}
+        >
+          新会话
+        </button>
+      </div>
       <section className="dialog" aria-label="对话">
         <div className="messages" ref={messagesRef}>
+          {messages.length === 0 && !restoring ? (
+            <p className="empty">写在下面，讲解会出现在这里。</p>
+          ) : null}
           {messages.map((message, index) => (
             <div className={`bubble ${message.role}`} key={`${message.role}-${index}`}>
-              {message.content}
+              {message.content ? (
+                message.content
+              ) : (
+                <span className="pending" aria-label="正在回复" />
+              )}
             </div>
           ))}
         </div>

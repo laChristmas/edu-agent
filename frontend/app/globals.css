@@ -9,14 +9,19 @@ body {
 }
 
 body {
-  font-family: "Segoe UI", sans-serif;
+  font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
   color: #1c1c1c;
-  background: #f6f6f4;
+  background: #efece6;
 }
 
 button,
 textarea {
   font: inherit;
+}
+
+button:focus-visible {
+  outline: 2px solid #1c1c1c;
+  outline-offset: 2px;
 }
 
 .page {
@@ -25,19 +30,49 @@ textarea {
   height: 100vh;
   max-width: 1080px;
   margin: 0 auto;
-  padding: 24px 20px 16px;
+  padding: 28px 24px 20px;
+}
+
+.top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
 }
 
 .page h1 {
   margin: 0;
   font-size: 22px;
   font-weight: 600;
+  letter-spacing: 0.01em;
 }
 
 .intro {
-  margin: 8px 0 16px;
-  color: #5c5c5c;
+  max-width: 42em;
+  margin: 8px 0 18px;
+  color: #6b6b66;
   font-size: 14px;
+  line-height: 1.6;
+}
+
+.new-chat {
+  flex: none;
+  margin-top: 2px;
+  padding: 7px 14px;
+  border: 1px solid #d5d2cb;
+  border-radius: 999px;
+  background: #fff;
+  color: #1c1c1c;
+  cursor: pointer;
+}
+
+.new-chat:hover:not(:disabled) {
+  background: #f7f6f3;
+}
+
+.new-chat:disabled {
+  cursor: default;
+  opacity: 0.45;
 }
 
 .dialog {
@@ -45,9 +80,11 @@ textarea {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  padding: 16px 18px 12px;
+  padding: 20px 20px 16px;
   background: #fff;
-  border: 1px solid #e2e2de;
+  border: 1px solid #e4e1da;
+  border-radius: 18px;
+  box-shadow: 0 1px 2px rgba(28, 28, 28, 0.04), 0 12px 32px rgba(28, 28, 28, 0.05);
 }
 
 .messages {
@@ -56,36 +93,68 @@ textarea {
   overflow: auto;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 14px;
+  padding-right: 4px;
+}
+
+.messages::-webkit-scrollbar {
+  width: 8px;
+}
+
+.messages::-webkit-scrollbar-thumb {
+  background: #e4e1da;
+  border-radius: 999px;
+}
+
+.empty {
+  margin: auto;
+  color: #8a8a84;
+  font-size: 14px;
+  text-align: center;
 }
 
 .bubble {
   max-width: 100%;
-  padding: 10px 14px;
+  padding: 12px 16px;
   white-space: pre-wrap;
-  line-height: 1.6;
+  line-height: 1.7;
+  font-size: 15px;
 }
 
 .bubble.user {
   align-self: flex-end;
+  max-width: min(78%, 640px);
+  border-radius: 16px 16px 4px 16px;
   background: #1c1c1c;
-  color: #f6f6f4;
+  color: #f6f4ef;
 }
 
 .bubble.assistant {
   align-self: flex-start;
-  background: #f6f6f4;
-  border: 1px solid #e2e2de;
+  border-radius: 4px 16px 16px 16px;
+  background: #f7f6f3;
+  border: 1px solid #eceae4;
+}
+
+.pending {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin: 0 16px 0 2px;
+  border-radius: 50%;
+  background: #9a9a94;
+  box-shadow: 10px 0 0 #c8c8c2, 20px 0 0 #e2e2de;
+  vertical-align: middle;
 }
 
 .error {
-  margin: 8px 0 0;
+  margin: 10px 0 0;
   color: #8a1f1f;
   font-size: 14px;
 }
 
 .composer {
-  margin-top: 12px;
+  margin-top: 14px;
 }
 
 .composer-field {
@@ -100,23 +169,31 @@ textarea {
   min-height: 96px;
   max-height: 420px;
   resize: none;
-  padding: 10px 26px 46px 12px;
-  border: 1px solid #c8c8c2;
-  background: #f6f6f4;
+  padding: 12px 28px 48px 14px;
+  border: 1px solid #e0ddd6;
+  border-radius: 14px;
+  background: #fafaf8;
+  color: #1c1c1c;
+  line-height: 1.6;
   overflow: auto;
+}
+
+.composer textarea:focus {
+  outline: none;
+  border-color: #1c1c1c;
 }
 
 .resize-handle {
   position: absolute;
-  top: 4px;
-  right: 4px;
+  top: 6px;
+  right: 6px;
   display: grid;
   place-items: center;
   width: 22px;
   height: 22px;
   padding: 0;
   border: 0;
-  border-radius: 4px;
+  border-radius: 6px;
   background: transparent;
   color: #b4b4ae;
   cursor: ns-resize;
@@ -133,7 +210,7 @@ textarea {
 
 .resize-handle:hover,
 .resize-handle:focus-visible {
-  background: #e7e7e2;
+  background: #efece6;
   color: #1c1c1c;
 }
 
@@ -141,14 +218,19 @@ textarea {
   position: absolute;
   right: 8px;
   bottom: 8px;
-  padding: 6px 12px;
+  padding: 7px 14px;
   border: 0;
+  border-radius: 999px;
   background: #1c1c1c;
-  color: #f6f6f4;
+  color: #f6f4ef;
   cursor: pointer;
+}
+
+.send:hover:not(:disabled) {
+  background: #333;
 }
 
 .send:disabled {
   cursor: default;
-  opacity: 0.45;
+  opacity: 0.4;
 }
