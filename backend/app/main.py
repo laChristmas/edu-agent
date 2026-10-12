@@ -79,6 +79,16 @@ async def health():
     }
 
 
+@app.get("/conversations/{conversation_id}/messages")
+async def list_messages(conversation_id: UUID):
+    """刷新页面时按会话编号取回已落库的消息。家教提示不在这些消息里。"""
+    await require_conversation(app.state.pool, conversation_id)
+    return {
+        "id": str(conversation_id),
+        "messages": await load_messages(app.state.pool, conversation_id),
+    }
+
+
 @app.post("/chat")
 async def chat(body: ChatIn):
     """把用户消息落库后逐字流式返回。同一会话上一轮未结束时不开始下一轮。"""

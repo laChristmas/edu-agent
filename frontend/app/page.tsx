@@ -1,8 +1,9 @@
 "use client";
 
-import { FormEvent, PointerEvent as ReactPointerEvent, useRef, useState } from "react";
+import { FormEvent, PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from "react";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:8000";
+const CONVERSATION_KEY = "eduagent.conversation_id";
 
 type Role = "user" | "assistant";
 
@@ -25,7 +26,62 @@ export default function ChatPage() {
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
   const [inputHeight, setInputHeight] = useState(96);
+  const [restoring, setRestoring] = useState(true);
   const resizeDrag = useRef<{ y: number; height: number } | null>(null);
+  const messagesRef = useRef<HTMLDivElement>(null);
+
+  function rememberConversation(id: string) {
+    setConversationId(id);
+    localStorage.setItem(CONVERSATION_KEY, id);
+  }
+
+  useEffect(() => {
+    const saved = localStorage.getItem(CONVERSATION_KEY);
+    if (!saved) {
+      setRestoring(false);
+      return;
+    }
+
+    let cancelled = false;
+    (async () => {
+      try {
+        const response = await fetch(`${API_BASE}/conversations/${saved}/messages`);
+        if (response.status === 404 || response.status === 422) {
+          localStorage.removeItem(CONVERSATION_KEY);
+          return;
+        }
+        if (!response.ok) {
+          setConversationId(saved);
+          setError("会话没有恢复");
+          return;
+        }
+        const body = (await response.json()) as { id: string; messages: ChatMessage[] };
+        if (cancelled) {
+          return;
+        }
+        setConversationId(body.id);
+        setMessages(body.messages);
+      } catch {
+        setConversationId(saved);
+        setError("会话没有恢复");
+      } finally {
+        if (!cancelled) {
+          setRestoring(false);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    const node = messagesRef.current;
+    if (node) {
+      node.scrollTop = node.scrollHeight;
+    }
+  }, [messages]);
 
   function startResize(event: ReactPointerEvent<HTMLButtonElement>) {
     event.preventDefault();
@@ -50,7 +106,7 @@ export default function ChatPage() {
   async function send(event: FormEvent) {
     event.preventDefault();
     const content = draft.trim();
-    if (!content || sending) {
+    if (!content || sending || restoring) {
       return;
     }
 
@@ -102,7 +158,7 @@ export default function ChatPage() {
           }
           const payload = JSON.parse(line.slice(5).trim()) as ChatEvent;
           if (payload.type === "conversation" && payload.id) {
-            setConversationId(payload.id);
+            rememberConversation(payload.id);
           } else if (payload.type === "delta" && payload.text) {
             const text = payload.text;
             setMessages((current) => {
@@ -131,7 +187,7 @@ export default function ChatPage() {
       <h1>EduAgent</h1>
       <p className="intro">一个对话里的学习助手。全学科问答、错题和复习，都从这句话开始。</p>
       <section className="dialog" aria-label="对话">
-        <div className="messages">
+        <div className="messages" ref={messagesRef}>
           {messages.map((message, index) => (
             <div className={`bubble ${message.role}`} key={`${message.role}-${index}`}>
               {message.content}
@@ -172,7 +228,7 @@ export default function ChatPage() {
                 <circle cx="7.75" cy="11.75" r="1.15" />
               </svg>
             </button>
-            <button type="submit" className="send" disabled={sending || !draft.trim()}>
+            <button type="submit" className="send" disabled={sending || restoring || !draft.trim()}>
               发送
             </button>
           </div>
