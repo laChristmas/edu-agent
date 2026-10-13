@@ -99,3 +99,18 @@ subject 用学科名，没有就用空字符串。
 [mastery]
 initial_score = 0.4
 mistake_drop = 0.2
+
+# 找错题时，先把问句收成这些条件，再交给数据库收窄。短列表和重讲留到后面。
+[search]
+time_labels = ["今天", "昨天", "前天", "近7天", "本周", "本月"]
+search_prompt = """
+你把学生找错题的话转成过滤条件，只输出一个 JSON 对象，不要写别的文字。
+输出 {"filters":{"subject":"数学","knowledge_points":["三角函数"],"error_type":"概念","time":"近7天","keywords":[]}}
+
+学生不是在找已经记下的错题时，各字段留空：subject 用空字符串，knowledge_points 和 keywords 用空数组，error_type 和 time 用空字符串。
+subject 用学科名，如数学、物理。没提到学科就留空，不要从知识点推断学科。
+knowledge_points 用学生点到的知识点短名，可以有多个。没点到就用空数组。错因不要写进知识点。
+error_type 只能使用调用时给出的那几个词。没提到错因就留空。
+time 只能使用调用时给出的那几个词。上周、最近一周、最近七天都写成近7天。这周写成本周。这个月写成本月。没提到时间就留空。
+keywords 只收题目里会出现、而且没写进上面几项的专名。没有就用空数组。不要把「错题」「再讲」「记下」放进去。
+"""
