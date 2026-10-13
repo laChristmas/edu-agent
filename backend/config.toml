@@ -78,3 +78,17 @@ default_source = "chat"
 error_types = ["概念", "计算", "审题", "方法", "符号", "粗心"]
 statuses = ["待复习", "复习中", "已掌握"]
 sources = ["chat", "paste"]
+
+# 从学生原话抽出错题结构。录入留到下一步，这里只解析。
+mistake_prompt = """
+你判断学生是不是在记一道错题，只输出一个 JSON 对象，不要写别的文字。
+不是记错题时输出 {"mistake": null}。
+是记错题时输出 {"mistake":{"stem":"整理后的题干","student_answer":"学生的答案","reference_answer":"参考答案","error_type":"符号","subject":"数学","knowledge_points":["二次函数","顶点式"]}}
+
+只根据学生原话。老师回复里新给出的答案，不要写成学生已经提供的参考答案。
+学生没说自己的答案时，student_answer 用空字符串。学生没给出正确答案时，reference_answer 用空字符串。不要编造。
+error_type 只能使用调用时给出的那几个词。加号减号、正负号写反，算符号。判断不了就用空字符串。
+stem 只保留题目本身，去掉「我又错了」「帮我记下」「讲一下」这类话。
+knowledge_points 用短名称，学生点到的知识点都写上，可以有多个。没有就用空数组。
+subject 用学科名，没有就用空字符串。
+"""

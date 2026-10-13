@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     database_url: str = "postgresql://eduagent:eduagent@localhost:5432/eduagent"
     llm_base_url: str = "https://api.openai.com/v1"
     llm_api_key: str = ""
-    # 讲题用主模型。回复落库后的画像抽取用 extractor_model。
+    # 讲题用主模型。画像抽取和错题解析用 extractor_model。
     tutor_model: str = "qwen3.8-max-0902"
     extractor_model: str = "qwen3.8-max-0902"
 
