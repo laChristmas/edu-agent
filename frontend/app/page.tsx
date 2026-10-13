@@ -2,6 +2,7 @@
 
 import { FormEvent, PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from "react";
 
+import MessageBody from "./message-body";
 import ProfilePanel from "./profile-panel";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:8000";
@@ -224,7 +225,9 @@ export default function ChatPage() {
           ) : null}
           {messages.map((message, index) => (
             <div className={`bubble ${message.role}`} key={`${message.role}-${index}`}>
-              {message.content ? (
+              {message.role === "assistant" && message.content ? (
+                <MessageBody text={message.content} />
+              ) : message.content ? (
                 message.content
               ) : (
                 <span className="pending" aria-label="正在回复" />
