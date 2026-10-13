@@ -25,7 +25,7 @@ from app.config import get_settings
 from app.db import LOCAL_USER_ID, create_pool, ensure_schema, pgvector_version
 from app.extract import extract_turn
 from app.memory import active_facts, confirm_facts, list_profile, teaching_facts
-from app.mistakes import list_mistakes
+from app.mistakes import list_mistakes, record_turn
 
 logger = logging.getLogger("eduagent")
 
@@ -193,7 +193,7 @@ async def chat(body: ChatIn):
                     await save_message(pool, conversation_id, "assistant", "".join(parts))
             finally:
                 await end_turn(conversation_id)
-                # 抽取在回复落库之后另起任务，不占这条流式连接。
+                # 画像和错题都在回复落库之后另起任务，不占这条流式连接。
                 if user_message_id is not None and parts:
                     _spawn(
                         extract_turn(
@@ -201,6 +201,19 @@ async def chat(body: ChatIn):
                             app.state.http,
                             settings,
                             user_id=LOCAL_USER_ID,
+                            user_message_id=user_message_id,
+                            user_text=body.content,
+                            assistant_text="".join(parts),
+                        )
+                    )
+                if user_message_id is not None:
+                    _spawn(
+                        record_turn(
+                            pool,
+                            app.state.http,
+                            settings,
+                            user_id=LOCAL_USER_ID,
+                            conversation_id=conversation_id,
                             user_message_id=user_message_id,
                             user_text=body.content,
                             assistant_text="".join(parts),
