@@ -78,7 +78,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS profile_facts_active_key_idx
 """
 
 # 错题、知识点和掌握度都挂在用户上。关联表只负责把同一用户的错题和知识点接起来。
-# 题干向量先不规定维度，入库时可以空着，检索留到后面。
+# 向量列不规定维度。写入时按配置的长度补题干向量，检索索引留到后面。
 MISTAKE_SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS knowledge_points (
     id uuid PRIMARY KEY,

@@ -2,8 +2,11 @@ import json
 import logging
 import tomllib
 from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta, timezone
+from decimal import Decimal
 from pathlib import Path
 from uuid import UUID, uuid4
+from zoneinfo import ZoneInfo
 
 import asyncpg
 import httpx
@@ -22,6 +25,12 @@ ERROR_TYPE_LIST = [str(item) for item in _MISTAKES["error_types"]]
 ERROR_TYPES = frozenset(ERROR_TYPE_LIST)
 SOURCES = frozenset(str(item) for item in _MISTAKES["sources"])
 DEFAULT_SOURCE = str(_MISTAKES["default_source"])
+EMBEDDING_DIMENSIONS = int(_MISTAKES["embedding_dimensions"])
+_MASTERY = _RULES["mastery"]
+# 第一次因错题出现时落到薄弱线以下。再错一次按 mistake_drop 下调，不低于 0。
+INITIAL_SCORE = Decimal(str(_MASTERY["initial_score"]))
+MISTAKE_DROP = Decimal(str(_MASTERY["mistake_drop"]))
+_TIMEZONE = str(_RULES["profile"]["default_timezone"])
 
 
 @dataclass(frozen=True)
@@ -137,19 +146,22 @@ async def save_mistake(
     source: str,
     source_message_id: UUID | None = None,
 ) -> UUID:
-    """写入一道错题和它的知识点。向量和下次复习日留到后面再补。"""
+    """先把错题和明天的复习日写上，并下调掌握度。题干向量在提交之后另补。"""
     if source not in SOURCES:
         source = DEFAULT_SOURCE
     mistake_id = uuid4()
+    tomorrow = _local_today() + timedelta(days=1)
+    reviewed_at = _review_at(tomorrow)
+    now = datetime.now(reviewed_at.tzinfo)
     async with pool.acquire() as connection:
         async with connection.transaction():
             await connection.execute(
                 """
                 INSERT INTO mistakes (
                     id, user_id, raw_text, stem, student_answer, reference_answer,
-                    error_type, subject, source, source_message_id
+                    error_type, subject, source, source_message_id, next_review_at
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                 """,
                 mistake_id,
                 user_id,
@@ -161,6 +173,7 @@ async def save_mistake(
                 parsed.subject,
                 source,
                 source_message_id,
+                reviewed_at,
             )
             for name in parsed.knowledge_points:
                 point_id = await _ensure_point(connection, user_id, name)
@@ -174,6 +187,7 @@ async def save_mistake(
                     point_id,
                     user_id,
                 )
+                await _lower_mastery(connection, user_id, point_id, tomorrow, now)
     return mistake_id
 
 
@@ -200,7 +214,7 @@ async def record_turn(
         )
         if parsed is None:
             return
-        await save_mistake(
+        mistake_id = await save_mistake(
             pool,
             user_id=user_id,
             raw_text=user_text,
@@ -210,6 +224,110 @@ async def record_turn(
         )
     except Exception:
         logger.exception("错题录入失败")
+        return
+    # 向量失败时错题和明天的复习日已经留下。检索还没做，缺向量时以后用关键词。
+    try:
+        await fill_embedding(pool, client, settings, mistake_id, parsed.stem)
+    except Exception:
+        logger.exception("错题向量补写失败")
+
+
+async def fill_embedding(
+    pool: asyncpg.Pool,
+    client: httpx.AsyncClient,
+    settings: Settings,
+    mistake_id: UUID,
+    stem: str,
+) -> None:
+    """补写题干向量。调用方应在错题行提交之后再调用，避免向量接口拖住入库。"""
+    vector = await _embed(client, settings, stem)
+    if len(vector) != EMBEDDING_DIMENSIONS:
+        raise RuntimeError(f"题干向量长度是 {len(vector)}，配置是 {EMBEDDING_DIMENSIONS}")
+    literal = "[" + ",".join(format(float(item), ".8f") for item in vector) + "]"
+    await pool.execute(
+        """
+        UPDATE mistakes
+        SET embedding = $1::vector
+        WHERE id = $2 AND embedding IS NULL
+        """,
+        literal,
+        mistake_id,
+    )
+
+
+async def _embed(client: httpx.AsyncClient, settings: Settings, text: str) -> list:
+    url = settings.llm_base_url.rstrip("/") + "/embeddings"
+    response = await client.post(
+        url,
+        headers={"Authorization": f"Bearer {settings.llm_api_key}"},
+        json={
+            "model": settings.embedding_model,
+            "input": text,
+            "dimensions": EMBEDDING_DIMENSIONS,
+            "encoding_format": "float",
+        },
+    )
+    if response.status_code >= 400:
+        detail = response.text[:500]
+        raise RuntimeError(f"向量接口返回 {response.status_code}: {detail}")
+    data = response.json().get("data")
+    if not isinstance(data, list) or not data:
+        raise RuntimeError("向量接口没有返回数组")
+    embedding = data[0].get("embedding")
+    if not isinstance(embedding, list) or not embedding:
+        raise RuntimeError("向量接口没有返回数组")
+    return embedding
+
+
+def _zone():
+    # 上海不实行夏令时，固定东八区，不必再装时区数据。
+    if _TIMEZONE == "Asia/Shanghai":
+        return timezone(timedelta(hours=8))
+    return ZoneInfo(_TIMEZONE)
+
+
+def _local_today() -> date:
+    return datetime.now(_zone()).date()
+
+
+def _review_at(day: date) -> datetime:
+    return datetime.combine(day, time.min, tzinfo=_zone())
+
+
+async def _lower_mastery(
+    connection: asyncpg.Connection,
+    user_id: UUID,
+    point_id: UUID,
+    tomorrow: date,
+    now: datetime,
+) -> None:
+    """新错题把分数下调，并把这个知识点的下次复习放到明天。"""
+    await connection.execute(
+        """
+        INSERT INTO mastery (
+            id, user_id, knowledge_point_id, score, interval_days,
+            next_review_on, evidence_count, last_evidence_at, updated_at
+        )
+        VALUES ($1, $2, $3, $4, 1, $5, 1, $6, $6)
+        ON CONFLICT (user_id, knowledge_point_id) DO UPDATE
+        SET score = CASE
+                WHEN mastery.score IS NULL THEN EXCLUDED.score
+                ELSE GREATEST(0, mastery.score - $7)
+            END,
+            interval_days = 1,
+            next_review_on = EXCLUDED.next_review_on,
+            evidence_count = mastery.evidence_count + 1,
+            last_evidence_at = EXCLUDED.last_evidence_at,
+            updated_at = EXCLUDED.updated_at
+        """,
+        uuid4(),
+        user_id,
+        point_id,
+        INITIAL_SCORE,
+        tomorrow,
+        now,
+        MISTAKE_DROP,
+    )
 
 
 async def _ensure_point(connection: asyncpg.Connection, user_id: UUID, name: str) -> UUID:

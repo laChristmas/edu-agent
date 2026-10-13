@@ -78,6 +78,8 @@ default_source = "chat"
 error_types = ["概念", "计算", "审题", "方法", "符号", "粗心"]
 statuses = ["待复习", "复习中", "已掌握"]
 sources = ["chat", "paste"]
+# 题干向量的长度。检索索引留到后面，现在只把这个长度写进向量。
+embedding_dimensions = 1024
 
 # 从学生原话抽出错题结构。口述、粘贴和讲完后补记都走这个结构再写入。
 mistake_prompt = """
@@ -92,3 +94,8 @@ error_type 只能使用调用时给出的那几个词。加号减号、正负号
 knowledge_points 用短名称，学生点到的知识点都写上，可以有多个。没有就用空数组。
 subject 用学科名，没有就用空字符串。
 """
+
+# 新错题把对应知识点的掌握度下调，下次复习放在明天。完整间隔算法留到每日服务。
+[mastery]
+initial_score = 0.4
+mistake_drop = 0.2
