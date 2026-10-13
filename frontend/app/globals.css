@@ -337,3 +337,31 @@ button:focus-visible {
 .profile-save {
   position: static;
 }
+
+.mistake-card {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: #fafaf8;
+}
+
+.mistake-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  color: #6b6b66;
+  font-size: 12px;
+}
+
+.mistake-stem {
+  margin: 6px 0 0;
+  font-size: 15px;
+  line-height: 1.5;
+}
+
+.mistake-line {
+  margin: 4px 0 0;
+  color: #3a3a36;
+  font-size: 14px;
+  line-height: 1.5;
+}

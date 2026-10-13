@@ -15,8 +15,41 @@ type Section = {
   fields: Field[];
 };
 
+type Mistake = {
+  id: string;
+  raw_text: string;
+  stem: string | null;
+  student_answer: string | null;
+  reference_answer: string | null;
+  error_type: string | null;
+  subject: string | null;
+  status: string;
+  source: string;
+  knowledge_points: string[];
+  created_at: string;
+};
+
+const SOURCE_LABEL: Record<string, string> = {
+  chat: "对话",
+  paste: "粘贴",
+};
+
+function formatWhen(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+  return date.toLocaleString("zh-CN", {
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
 export default function ProfilePanel({ onClose }: { onClose: () => void }) {
   const [sections, setSections] = useState<Section[]>([]);
+  const [mistakes, setMistakes] = useState<Mistake[]>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -31,9 +64,10 @@ export default function ProfilePanel({ onClose }: { onClose: () => void }) {
         if (!response.ok) {
           throw new Error("读取失败");
         }
-        const body = (await response.json()) as { sections: Section[] };
+        const body = (await response.json()) as { sections: Section[]; mistakes?: Mistake[] };
         if (!cancelled) {
           setSections(body.sections);
+          setMistakes(body.mistakes ?? []);
         }
       } catch {
         if (!cancelled) {
@@ -178,6 +212,30 @@ export default function ProfilePanel({ onClose }: { onClose: () => void }) {
             )}
           </fieldset>
         ))}
+        <fieldset className="profile-section">
+          <legend>错题</legend>
+          {loading ? null : mistakes.length === 0 ? <p className="profile-note">还没有错题。</p> : null}
+          {mistakes.map((mistake) => (
+            <article className="mistake-card" key={mistake.id}>
+              <div className="mistake-meta">
+                <span>{mistake.subject || "未标学科"}</span>
+                <span>{mistake.error_type || "未标错因"}</span>
+                <span>{mistake.status}</span>
+                <span>{SOURCE_LABEL[mistake.source] ?? mistake.source}</span>
+                <span>{formatWhen(mistake.created_at)}</span>
+              </div>
+              <p className="mistake-stem">{mistake.stem || mistake.raw_text}</p>
+              {mistake.stem && mistake.raw_text !== mistake.stem ? (
+                <p className="mistake-line">原话：{mistake.raw_text}</p>
+              ) : null}
+              {mistake.student_answer ? <p className="mistake-line">我的答案：{mistake.student_answer}</p> : null}
+              {mistake.reference_answer ? <p className="mistake-line">参考答案：{mistake.reference_answer}</p> : null}
+              {mistake.knowledge_points.length > 0 ? (
+                <p className="mistake-line">知识点：{mistake.knowledge_points.join("、")}</p>
+              ) : null}
+            </article>
+          ))}
+        </fieldset>
         {error ? <p className="error">{error}</p> : null}
         {saved ? <p className="profile-saved">已确认</p> : null}
         <div className="profile-actions">

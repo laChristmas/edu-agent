@@ -25,6 +25,7 @@ from app.config import get_settings
 from app.db import LOCAL_USER_ID, create_pool, ensure_schema, pgvector_version
 from app.extract import extract_turn
 from app.memory import active_facts, confirm_facts, list_profile, teaching_facts
+from app.mistakes import list_mistakes
 
 logger = logging.getLogger("eduagent")
 
@@ -111,8 +112,12 @@ async def health():
 
 @app.get("/profile")
 async def profile():
-    """返回本地用户仍有效的画像。固定键即使还没写过也会留出空栏。"""
-    return {"sections": await list_profile(app.state.pool, LOCAL_USER_ID)}
+    """返回本地用户仍有效的画像，以及已经记下的错题。"""
+    pool = app.state.pool
+    return {
+        "sections": await list_profile(pool, LOCAL_USER_ID),
+        "mistakes": await list_mistakes(pool, LOCAL_USER_ID),
+    }
 
 
 @app.post("/profile")
