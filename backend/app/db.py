@@ -1,3 +1,5 @@
+import tomllib
+from pathlib import Path
 from uuid import UUID
 
 import asyncpg
@@ -6,6 +8,28 @@ from app.config import Settings
 
 
 LOCAL_USER_ID = UUID("00000000-0000-0000-0000-000000000001")
+
+_CONFIG_PATH = Path(__file__).resolve().parents[1] / "config.toml"
+with _CONFIG_PATH.open("rb") as config_file:
+    _MISTAKES = tomllib.load(config_file)["mistakes"]
+
+
+def _sql_texts(values: list[str]) -> str:
+    return ", ".join("'" + item.replace("'", "''") + "'" for item in values)
+
+
+def _configured_text(name: str, allowed: list[str]) -> str:
+    value = str(_MISTAKES[name])
+    if value not in allowed:
+        raise RuntimeError(f"{name} 不在允许的取值里")
+    return value.replace("'", "''")
+
+
+_ERROR_TYPES = list(_MISTAKES["error_types"])
+_STATUSES = list(_MISTAKES["statuses"])
+_SOURCES = list(_MISTAKES["sources"])
+_DEFAULT_STATUS = _configured_text("default_status", _STATUSES)
+_DEFAULT_SOURCE = _configured_text("default_source", _SOURCES)
 
 # 第 1 期界面只有本地单账号，表结构仍按多用户来建。
 SCHEMA = """
@@ -53,11 +77,70 @@ CREATE UNIQUE INDEX IF NOT EXISTS profile_facts_active_key_idx
     WHERE status = '有效';
 """
 
+# 错题、知识点和掌握度都挂在用户上。关联表只负责把同一用户的错题和知识点接起来。
+# 题干向量先不规定维度，入库时可以空着，检索留到后面。
+MISTAKE_SCHEMA = f"""
+CREATE TABLE IF NOT EXISTS knowledge_points (
+    id uuid PRIMARY KEY,
+    user_id uuid NOT NULL REFERENCES users (id),
+    name text NOT NULL CHECK (length(btrim(name)) > 0),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (id, user_id),
+    UNIQUE (user_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS mistakes (
+    id uuid PRIMARY KEY,
+    user_id uuid NOT NULL REFERENCES users (id),
+    raw_text text NOT NULL CHECK (length(btrim(raw_text)) > 0),
+    stem text,
+    student_answer text,
+    reference_answer text,
+    error_type text CHECK (error_type IS NULL OR error_type IN ({_sql_texts(_ERROR_TYPES)})),
+    subject text,
+    embedding vector,
+    status text NOT NULL DEFAULT '{_DEFAULT_STATUS}' CHECK (status IN ({_sql_texts(_STATUSES)})),
+    source text NOT NULL DEFAULT '{_DEFAULT_SOURCE}' CHECK (source IN ({_sql_texts(_SOURCES)})),
+    next_review_at timestamptz,
+    source_message_id uuid REFERENCES messages (id),
+    created_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (id, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS mistakes_user_created_idx
+    ON mistakes (user_id, created_at);
+
+CREATE TABLE IF NOT EXISTS mastery (
+    id uuid PRIMARY KEY,
+    user_id uuid NOT NULL,
+    knowledge_point_id uuid NOT NULL,
+    score numeric(3, 2) CHECK (score IS NULL OR (score >= 0 AND score <= 1)),
+    interval_days integer CHECK (interval_days IS NULL OR interval_days >= 0),
+    next_review_on date,
+    evidence_count integer NOT NULL DEFAULT 0 CHECK (evidence_count >= 0),
+    last_evidence_at timestamptz,
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    UNIQUE (user_id, knowledge_point_id),
+    FOREIGN KEY (knowledge_point_id, user_id)
+        REFERENCES knowledge_points (id, user_id)
+);
+
+CREATE TABLE IF NOT EXISTS mistake_points (
+    mistake_id uuid NOT NULL,
+    knowledge_point_id uuid NOT NULL,
+    user_id uuid NOT NULL,
+    PRIMARY KEY (mistake_id, knowledge_point_id),
+    FOREIGN KEY (mistake_id, user_id) REFERENCES mistakes (id, user_id),
+    FOREIGN KEY (knowledge_point_id, user_id) REFERENCES knowledge_points (id, user_id)
+);
+"""
+
 
 async def ensure_schema(pool: asyncpg.Pool) -> None:
-    """建会话和画像表，并保证本地用户只有一行。"""
+    """建会话、画像、错题相关的表，并保证本地用户只有一行。"""
     async with pool.acquire() as connection:
         await connection.execute(SCHEMA)
+        await connection.execute(MISTAKE_SCHEMA)
         # 已有库补上考试日期，并把「已结束」放进状态约束。
         await connection.execute("ALTER TABLE profile_facts ADD COLUMN IF NOT EXISTS ends_on date")
         await connection.execute(

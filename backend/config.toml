@@ -70,3 +70,11 @@ close_keys = ["近期考试", "近期时间"]
 [[profile.exam_groups]]
 time_key = "升学时间"
 close_keys = ["升学考试", "升学时间", "升学去向"]
+
+# 错题入库用的取值。拍照来源留到第 5 期再加。
+[mistakes]
+default_status = "待复习"
+default_source = "chat"
+error_types = ["概念", "计算", "审题", "方法", "符号", "粗心"]
+statuses = ["待复习", "复习中", "已掌握"]
+sources = ["chat", "paste"]
