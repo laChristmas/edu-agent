@@ -23,6 +23,8 @@ with _CONFIG_PATH.open("rb") as config_file:
 _SEARCH = _RULES["search"]
 SEARCH_PROMPT = str(_SEARCH["search_prompt"]).strip()
 REPLY_PROMPT = str(_SEARCH["reply_prompt"]).strip()
+RETEACH_DEFAULT = str(_SEARCH["reteach_default"]).strip()
+_RETEACH = {str(key): str(value).strip() for key, value in _SEARCH["reteach"].items()}
 TIME_LABELS = [str(item) for item in _SEARCH["time_labels"]]
 _TIMEZONE = str(_RULES["profile"]["default_timezone"])
 # 上周在方案里就是近 7 天，不按自然周切。模型若照原话写，这里收成配置里的词。
@@ -187,7 +189,7 @@ async def prepare_mistake_lookup(
     conversation_id: UUID,
     user_text: str,
 ) -> str | None:
-    """多题只准备短列表，点名或只命中一道时才准备展开。普通讲题返回空。"""
+    """多题只准备短列表。点名或只命中一道时按错因准备重讲。普通讲题返回空。"""
     text = user_text.strip()
     if not _looks_like_lookup(text):
         return None
@@ -201,6 +203,7 @@ async def prepare_mistake_lookup(
             detail = await _load_mistake(pool, user_id, listed[position - 1])
             if detail is None:
                 return _reply("点到的那道错题已经不在了。")
+            logger.info("按错因重讲：%s", detail["error_type"] or "未记下")
             return _reply(_open_body(detail))
     filters = await parse_search_filters(client, settings, text)
     if not filters.narrows():
@@ -213,6 +216,7 @@ async def prepare_mistake_lookup(
         if detail is None:
             return _reply("没有命中已记下的错题。")
         await _remember(pool, conversation_id, user_id, [detail["id"]])
+        logger.info("按错因重讲：%s", detail["error_type"] or "未记下")
         return _reply(_open_body(detail))
     await _remember(pool, conversation_id, user_id, [row["id"] for row in rows])
     return _reply(_list_body(rows))
@@ -257,16 +261,27 @@ def _list_body(rows: list[dict]) -> str:
 def _open_body(detail: dict) -> str:
     reference = detail["reference_answer"] or "（没有记下）"
     student = detail["student_answer"] or "（没有记下）"
+    points = detail.get("point_names") or "（没有）"
+    mastery = detail.get("mastery_text") or "（没有）"
     return "\n".join(
         [
-            "展开这一道记下的内容。",
+            "按下面的讲法重讲这一道。",
+            f"讲法：{_reteach_line(detail['error_type'])}",
             f"时间：{_day_label(detail['created_on'])}",
             f"题干：{detail['stem'] or '（没有题干）'}",
             f"学生答案：{student}",
             f"参考答案：{reference}",
             f"错因：{_error_label(detail['error_type'])}",
+            f"知识点：{points}",
+            f"掌握度：{mastery}",
         ]
     )
+
+
+def _reteach_line(error_type: str | None) -> str:
+    if error_type and error_type in _RETEACH:
+        return _RETEACH[error_type]
+    return RETEACH_DEFAULT
 
 
 def _first_sentence(stem: str | None) -> str:
@@ -329,14 +344,39 @@ async def _load_mistake(pool: asyncpg.Pool, user_id: UUID, mistake_id: UUID) -> 
     row = await pool.fetchrow(
         """
         SELECT
-            id,
-            stem,
-            student_answer,
-            reference_answer,
-            error_type,
-            (created_at AT TIME ZONE 'Asia/Shanghai')::date AS created_on
-        FROM mistakes
-        WHERE id = $1 AND user_id = $2
+            m.id,
+            m.stem,
+            m.student_answer,
+            m.reference_answer,
+            m.error_type,
+            (m.created_at AT TIME ZONE 'Asia/Shanghai')::date AS created_on,
+            COALESCE(
+                (
+                    SELECT string_agg(k.name, '、' ORDER BY k.name)
+                    FROM mistake_points mp
+                    JOIN knowledge_points k
+                        ON k.id = mp.knowledge_point_id AND k.user_id = mp.user_id
+                    WHERE mp.mistake_id = m.id AND mp.user_id = m.user_id
+                ),
+                ''
+            ) AS point_names,
+            COALESCE(
+                (
+                    SELECT string_agg(
+                        k.name || ' ' || COALESCE(ma.score::text, '未记'),
+                        '、' ORDER BY k.name
+                    )
+                    FROM mistake_points mp
+                    JOIN knowledge_points k
+                        ON k.id = mp.knowledge_point_id AND k.user_id = mp.user_id
+                    LEFT JOIN mastery ma
+                        ON ma.knowledge_point_id = k.id AND ma.user_id = mp.user_id
+                    WHERE mp.mistake_id = m.id AND mp.user_id = m.user_id
+                ),
+                ''
+            ) AS mastery_text
+        FROM mistakes m
+        WHERE m.id = $1 AND m.user_id = $2
         """,
         mistake_id,
         user_id,
