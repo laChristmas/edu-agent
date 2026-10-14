@@ -120,6 +120,12 @@ export default function ChatPage() {
     resizeDrag.current = null;
   }
 
+  function rememberConversation(id: string) {
+    // 会话编号只在流的第一条事件里给出。这里不留下，后面的文字就到不了页面。
+    setConversationId(id);
+    localStorage.setItem(CONVERSATION_KEY, id);
+  }
+
   async function send(event: FormEvent) {
     event.preventDefault();
     const content = draft.trim();
