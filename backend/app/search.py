@@ -12,6 +12,7 @@ import asyncpg
 import httpx
 
 from app.config import Settings
+from app.daily import prepare_due_note
 from app.mastery import apply_review_rows, local_today, review_moment
 from app.mistakes import ERROR_TYPE_LIST, ERROR_TYPES
 
@@ -195,7 +196,7 @@ async def prepare_mistake_lookup(
     user_text: str,
     source_message_id: UUID | None = None,
 ) -> str | None:
-    """多题只准备短列表。点名或只命中一道时按错因准备重讲。问最多的错因就计数，标成会了才写入。"""
+    """多题只准备短列表。点名或只命中一道时按错因准备重讲。问今天该复习什么才选题。"""
     text = user_text.strip()
     outcome = _review_outcome(text)
     if outcome is not None:
@@ -211,6 +212,9 @@ async def prepare_mistake_lookup(
         )
     if _looks_like_stats(text):
         return await _prepare_stats(pool, user_id)
+    due_note = await prepare_due_note(pool, user_id, text)
+    if due_note is not None:
+        return due_note
     if not _looks_like_lookup(text):
         return None
     picked = _named_index(text)
