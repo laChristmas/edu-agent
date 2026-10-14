@@ -13,7 +13,7 @@ import httpx
 from app.chat import create_conversation, load_messages, require_conversation
 from app.config import Settings
 from app.mastery import local_today, review_moment
-from app.memory import teaching_facts
+from app.memory import active_facts, teaching_facts
 
 logger = logging.getLogger("eduagent.daily")
 
@@ -29,6 +29,8 @@ WEAK_EVIDENCE_DAYS = int(_DAILY["weak_evidence_days"])
 DUE_PHRASES = tuple(str(item) for item in _DAILY["due_phrases"])
 DUE_PROMPT = str(_DAILY["due_prompt"]).strip()
 BRIEFING_PROMPT = str(_DAILY["briefing_prompt"]).strip()
+GREETING_PROMPT = str(_DAILY["greeting_prompt"]).strip()
+GREETING_FALLBACK = str(_DAILY["greeting_fallback"]).strip()
 POINT_PROMPT = str(_DAILY["point_prompt"]).strip()
 START_PHRASES = frozenset(str(item) for item in _DAILY["start_phrases"])
 _ITEM_INDEX = {"一": 1, "二": 2, "三": 3}
@@ -93,28 +95,29 @@ async def open_briefing(
     user_id: UUID,
     conversation_id: UUID | None,
 ) -> OpenedDialog:
-    """打开对话前写简报。选题为空就不发，还没回复的上一条直接换掉。"""
+    """打开对话前写简报。没有选题时改成一句招呼，避免会话框空着。"""
     if conversation_id is not None:
         await require_conversation(pool, conversation_id)
     selection = await select_daily(pool, user_id)
-    if selection.is_empty:
-        if conversation_id is not None:
-            await _drop_pending_briefing(pool, conversation_id)
-            messages = await load_messages(pool, conversation_id)
-        else:
-            messages = []
-        logger.info("打开前简报：选题为空，不发")
-        return OpenedDialog(conversation_id, messages)
     try:
-        text = await _compose_briefing(pool, client, settings, user_id, selection)
+        if selection.is_empty:
+            text = await _compose_greeting(pool, client, settings, user_id)
+        else:
+            text = await _compose_briefing(pool, client, settings, user_id, selection)
     except Exception:
         logger.exception("简报文案没有写成")
-        messages = [] if conversation_id is None else await load_messages(pool, conversation_id)
-        return OpenedDialog(conversation_id, messages)
+        if not selection.is_empty:
+            messages = [] if conversation_id is None else await load_messages(pool, conversation_id)
+            return OpenedDialog(conversation_id, messages)
+        # 招呼没写成也留一句，不再把打开变成空白。
+        text = GREETING_FALLBACK
     if conversation_id is None:
         conversation_id = await create_conversation(pool)
     replaced = await _store_briefing(pool, conversation_id, user_id, text, selection)
-    logger.info("打开前简报：%s", "替换未回复的一条" if replaced else "新写一条")
+    if selection.is_empty:
+        logger.info("打开前简报：没有选题，写一句招呼")
+    else:
+        logger.info("打开前简报：%s", "替换未回复的一条" if replaced else "新写一条")
     return OpenedDialog(conversation_id, await load_messages(pool, conversation_id))
 
 
@@ -296,6 +299,58 @@ async def _compose_briefing(
     return text
 
 
+async def _compose_greeting(
+    pool: asyncpg.Pool,
+    client: httpx.AsyncClient,
+    settings: Settings,
+    user_id: UUID,
+) -> str:
+    """没有复习条目时只打招呼。档案全部交给模型，由它决定写不写进招呼。"""
+    known = _archive_text(await active_facts(pool, user_id))
+    url = settings.llm_base_url.rstrip("/") + "/chat/completions"
+    response = await client.post(
+        url,
+        headers={"Authorization": f"Bearer {settings.llm_api_key}"},
+        json={
+            "model": settings.extractor_model,
+            "messages": [
+                {"role": "system", "content": GREETING_PROMPT},
+                {"role": "user", "content": known},
+            ],
+        },
+    )
+    if response.status_code >= 400:
+        detail = response.text[:500]
+        raise RuntimeError(f"招呼接口返回 {response.status_code}: {detail}")
+    content = response.json()["choices"][0]["message"]["content"]
+    text = str(content or "").strip()
+    if not text:
+        raise RuntimeError("招呼是空的")
+    return text
+
+
+def _archive_text(facts: list[dict[str, str]]) -> str:
+    """按维度拼出全部有效档案。空档案也要标明，避免模型自己编。"""
+    if not facts:
+        return "档案：无"
+    lines = ["档案："]
+    dimension = ""
+    items: list[str] = []
+
+    def flush() -> None:
+        if dimension:
+            lines.append(f"{dimension}：" + "；".join(items))
+
+    for fact in facts:
+        if fact["dimension"] != dimension:
+            flush()
+            dimension = fact["dimension"]
+            items = []
+        items.append(f"{fact['key']}={fact['value']}")
+    flush()
+    return "\n".join(lines)
+
+
 async def prepare_briefing_lesson(
     pool: asyncpg.Pool,
     *,
@@ -380,20 +435,6 @@ async def _store_briefing(
                 replaced = False
             await _replace_items(connection, message_id, user_id, selection)
     return replaced
-
-
-async def _drop_pending_briefing(pool: asyncpg.Pool, conversation_id: UUID) -> None:
-    """这次没有选题时，不把上一条还没回复的简报留在开场。"""
-    async with pool.acquire() as connection:
-        async with connection.transaction():
-            await connection.execute(
-                "SELECT id FROM conversations WHERE id = $1 FOR UPDATE",
-                conversation_id,
-            )
-            last_id = await _pending_briefing_id(connection, conversation_id)
-            if last_id is None:
-                return
-            await connection.execute("DELETE FROM messages WHERE id = $1 AND kind = 'briefing'", last_id)
 
 
 async def _replace_items(

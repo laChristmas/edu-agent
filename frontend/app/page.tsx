@@ -8,6 +8,9 @@ import ProfilePanel from "./profile-panel";
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:8000";
 const CONVERSATION_KEY = "eduagent.conversation_id";
 
+// 开发模式会把打开跑两遍。共用同一次请求，避免连写两条简报。
+let openingDialog: Promise<{ id: string | null; messages: ChatMessage[] }> | null = null;
+
 type Role = "user" | "assistant";
 
 type ChatMessage = {
@@ -34,34 +37,27 @@ export default function ChatPage() {
   const resizeDrag = useRef<{ y: number; height: number } | null>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
 
-  const openDialog = useCallback(async (saved: string | null) => {
+  const openDialog = useCallback(async () => {
     setRestoring(true);
     setError("");
+    // 打开时先清空。上一段即使还指在本地，也不再铺进会话框。
+    setMessages([]);
+    setConversationId(null);
+    localStorage.removeItem(CONVERSATION_KEY);
     try {
-      const response = await fetch(`${API_BASE}/briefing`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ conversation_id: saved }),
-      });
-      if (saved && (response.status === 404 || response.status === 422)) {
-        localStorage.removeItem(CONVERSATION_KEY);
-        await openDialog(null);
-        return;
-      }
-      if (!response.ok) {
-        setError("简报没有写成");
-        if (saved) {
-          const fallback = await fetch(`${API_BASE}/conversations/${saved}/messages`);
-          if (fallback.ok) {
-            const previous = (await fallback.json()) as { id: string; messages: ChatMessage[] };
-            setConversationId(previous.id);
-            localStorage.setItem(CONVERSATION_KEY, previous.id);
-            setMessages(previous.messages);
+      if (!openingDialog) {
+        openingDialog = fetch(`${API_BASE}/briefing`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ conversation_id: null }),
+        }).then(async (response) => {
+          if (!response.ok) {
+            throw new Error("briefing");
           }
-        }
-        return;
+          return (await response.json()) as { id: string | null; messages: ChatMessage[] };
+        });
       }
-      const body = (await response.json()) as { id: string | null; messages: ChatMessage[] };
+      const body = await openingDialog;
       if (body.id) {
         setConversationId(body.id);
         localStorage.setItem(CONVERSATION_KEY, body.id);
@@ -72,7 +68,9 @@ export default function ChatPage() {
       setMessages(body.messages);
     } catch {
       setError("简报没有写成");
+      setMessages([]);
     } finally {
+      openingDialog = null;
       setRestoring(false);
     }
   }, []);
@@ -81,16 +79,12 @@ export default function ChatPage() {
     if (sending || restoring) {
       return;
     }
-    // 放下这一段的本地指针后再打开。已落库的原文仍留在库里。
-    setMessages([]);
-    setConversationId(null);
-    localStorage.removeItem(CONVERSATION_KEY);
-    void openDialog(null);
+    // 放下这一段再打开。已落库的原文仍留在库里，只是不显示。
+    void openDialog();
   }
 
   useEffect(() => {
-    const saved = localStorage.getItem(CONVERSATION_KEY);
-    void openDialog(saved);
+    void openDialog();
   }, [openDialog]);
 
   useEffect(() => {
