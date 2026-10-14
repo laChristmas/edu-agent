@@ -4,11 +4,15 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import asyncpg
+import httpx
 
+from app.chat import create_conversation, load_messages, require_conversation
+from app.config import Settings
 from app.mastery import local_today, review_moment
+from app.memory import teaching_facts
 
 logger = logging.getLogger("eduagent.daily")
 
@@ -23,6 +27,7 @@ WEAK_SCORE_BELOW = Decimal(str(_DAILY["weak_score_below"]))
 WEAK_EVIDENCE_DAYS = int(_DAILY["weak_evidence_days"])
 DUE_PHRASES = tuple(str(item) for item in _DAILY["due_phrases"])
 DUE_PROMPT = str(_DAILY["due_prompt"]).strip()
+BRIEFING_PROMPT = str(_DAILY["briefing_prompt"]).strip()
 
 
 @dataclass(frozen=True)
@@ -31,6 +36,7 @@ class DueMistake:
     stem: str
     error_type: str | None
     due_on: date
+    knowledge_points: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -69,6 +75,45 @@ async def prepare_due_note(pool: asyncpg.Pool, user_id: UUID, user_text: str) ->
     return f"{DUE_PROMPT}\n{_body(selection)}"
 
 
+@dataclass(frozen=True)
+class OpenedDialog:
+    conversation_id: UUID | None
+    messages: list[dict[str, str]]
+
+
+async def open_briefing(
+    pool: asyncpg.Pool,
+    client: httpx.AsyncClient,
+    settings: Settings,
+    *,
+    user_id: UUID,
+    conversation_id: UUID | None,
+) -> OpenedDialog:
+    """打开对话前写简报。选题为空就不发，还没回复的上一条直接换掉。"""
+    if conversation_id is not None:
+        await require_conversation(pool, conversation_id)
+    selection = await select_daily(pool, user_id)
+    if selection.is_empty:
+        if conversation_id is not None:
+            await _drop_pending_briefing(pool, conversation_id)
+            messages = await load_messages(pool, conversation_id)
+        else:
+            messages = []
+        logger.info("打开前简报：选题为空，不发")
+        return OpenedDialog(conversation_id, messages)
+    try:
+        text = await _compose_briefing(pool, client, settings, user_id, selection)
+    except Exception:
+        logger.exception("简报文案没有写成")
+        messages = [] if conversation_id is None else await load_messages(pool, conversation_id)
+        return OpenedDialog(conversation_id, messages)
+    if conversation_id is None:
+        conversation_id = await create_conversation(pool)
+    replaced = await _store_briefing(pool, conversation_id, text)
+    logger.info("打开前简报：%s", "替换未回复的一条" if replaced else "新写一条")
+    return OpenedDialog(conversation_id, await load_messages(pool, conversation_id))
+
+
 async def select_daily(
     pool: asyncpg.Pool,
     user_id: UUID,
@@ -92,15 +137,24 @@ async def select_daily(
     rows = await pool.fetch(
         """
         SELECT
-            id,
-            stem,
-            error_type,
-            (next_review_at AT TIME ZONE 'Asia/Shanghai')::date AS due_on
-        FROM mistakes
-        WHERE user_id = $1
-          AND next_review_at IS NOT NULL
-          AND next_review_at < $2
-        ORDER BY next_review_at, created_at, id
+            m.id,
+            m.stem,
+            m.error_type,
+            (m.next_review_at AT TIME ZONE 'Asia/Shanghai')::date AS due_on,
+            COALESCE(
+                array_agg(k.name ORDER BY k.name) FILTER (WHERE k.name IS NOT NULL),
+                ARRAY[]::text[]
+            ) AS knowledge_points
+        FROM mistakes m
+        LEFT JOIN mistake_points mp
+            ON mp.mistake_id = m.id AND mp.user_id = m.user_id
+        LEFT JOIN knowledge_points k
+            ON k.id = mp.knowledge_point_id AND k.user_id = m.user_id
+        WHERE m.user_id = $1
+          AND m.next_review_at IS NOT NULL
+          AND m.next_review_at < $2
+        GROUP BY m.id
+        ORDER BY m.next_review_at, m.created_at, m.id
         LIMIT $3
         """,
         user_id,
@@ -113,6 +167,7 @@ async def select_daily(
             stem=row["stem"] or "",
             error_type=row["error_type"],
             due_on=row["due_on"],
+            knowledge_points=tuple(row["knowledge_points"]),
         )
         for row in rows
     )
@@ -171,9 +226,11 @@ def _body(selection: DailySelection) -> str:
     lines = ["到期错题："]
     if selection.mistakes:
         for index, item in enumerate(selection.mistakes, start=1):
+            points = "、".join(item.knowledge_points)
+            point_label = f"，知识点{points}" if points else ""
             lines.append(
-                f"{index}. {_day_label(item.due_on)}到期，错因{_error_label(item.error_type)}，"
-                f"{_first_sentence(item.stem)}"
+                f"{index}. {_day_label(item.due_on)}到期，错因{_error_label(item.error_type)}"
+                f"{point_label}，{_first_sentence(item.stem)}"
             )
     else:
         lines.append("无")
@@ -200,3 +257,93 @@ def _error_label(error_type: str | None) -> str:
 
 def _day_label(day: date) -> str:
     return f"{day.month}月{day.day}日"
+
+
+async def _compose_briefing(
+    pool: asyncpg.Pool,
+    client: httpx.AsyncClient,
+    settings: Settings,
+    user_id: UUID,
+    selection: DailySelection,
+) -> str:
+    """简报用抽取那一档模型。文案失败就不要写成一条长讲解。"""
+    facts = await teaching_facts(pool, user_id)
+    interests = [f"{fact['key']}={fact['value']}" for fact in facts if fact["dimension"] == "兴趣"]
+    interest_line = "、".join(interests) if interests else "无"
+    url = settings.llm_base_url.rstrip("/") + "/chat/completions"
+    response = await client.post(
+        url,
+        headers={"Authorization": f"Bearer {settings.llm_api_key}"},
+        json={
+            "model": settings.extractor_model,
+            "messages": [
+                {"role": "system", "content": BRIEFING_PROMPT},
+                {"role": "user", "content": f"{_body(selection)}\n兴趣：{interest_line}"},
+            ],
+        },
+    )
+    if response.status_code >= 400:
+        detail = response.text[:500]
+        raise RuntimeError(f"简报接口返回 {response.status_code}: {detail}")
+    content = response.json()["choices"][0]["message"]["content"]
+    text = str(content or "").strip()
+    if not text:
+        raise RuntimeError("简报是空的")
+    return text
+
+
+async def _store_briefing(pool: asyncpg.Pool, conversation_id: UUID, text: str) -> bool:
+    """最后一条若仍是没被回复的简报，就改写它。已经接过话就另写一条。"""
+    async with pool.acquire() as connection:
+        async with connection.transaction():
+            await connection.execute(
+                "SELECT id FROM conversations WHERE id = $1 FOR UPDATE",
+                conversation_id,
+            )
+            last_id = await _pending_briefing_id(connection, conversation_id)
+            if last_id is not None:
+                await connection.execute(
+                    "UPDATE messages SET content = $2 WHERE id = $1",
+                    last_id,
+                    text,
+                )
+                return True
+            await connection.execute(
+                """
+                INSERT INTO messages (id, conversation_id, role, content, kind)
+                VALUES ($1, $2, 'assistant', $3, 'briefing')
+                """,
+                uuid4(),
+                conversation_id,
+                text,
+            )
+    return False
+
+
+async def _drop_pending_briefing(pool: asyncpg.Pool, conversation_id: UUID) -> None:
+    """这次没有选题时，不把上一条还没回复的简报留在开场。"""
+    async with pool.acquire() as connection:
+        async with connection.transaction():
+            await connection.execute(
+                "SELECT id FROM conversations WHERE id = $1 FOR UPDATE",
+                conversation_id,
+            )
+            last_id = await _pending_briefing_id(connection, conversation_id)
+            if last_id is None:
+                return
+            await connection.execute("DELETE FROM messages WHERE id = $1 AND kind = 'briefing'", last_id)
+
+
+async def _pending_briefing_id(connection: asyncpg.Connection, conversation_id: UUID) -> UUID | None:
+    row = await connection.fetchrow(
+        """
+        SELECT id, kind FROM messages
+        WHERE conversation_id = $1
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+        """,
+        conversation_id,
+    )
+    if row is None or row["kind"] != "briefing":
+        return None
+    return row["id"]

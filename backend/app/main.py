@@ -22,6 +22,7 @@ from app.chat import (
 )
 from app.tutor import tutor_messages
 from app.config import get_settings
+from app.daily import open_briefing
 from app.db import LOCAL_USER_ID, create_pool, ensure_schema, pgvector_version
 from app.extract import extract_turn
 from app.memory import active_facts, confirm_facts, list_profile, teaching_facts
@@ -79,6 +80,10 @@ class ProfileFactIn(BaseModel):
 
 class ProfileIn(BaseModel):
     facts: list[ProfileFactIn]
+
+
+class BriefingIn(BaseModel):
+    conversation_id: UUID | None = None
 
 
 class ChatIn(BaseModel):
@@ -142,6 +147,25 @@ async def list_messages(conversation_id: UUID):
     return {
         "id": str(conversation_id),
         "messages": await load_messages(app.state.pool, conversation_id),
+    }
+
+
+@app.post("/briefing")
+async def briefing(body: BriefingIn):
+    """打开对话前写一条简报。选题为空就不发，还没回复的上一条会被换掉。"""
+    settings = app.state.settings
+    if not settings.llm_api_key or not settings.llm_base_url:
+        raise HTTPException(status_code=503, detail="模型尚未配置")
+    opened = await open_briefing(
+        app.state.pool,
+        app.state.http,
+        settings,
+        user_id=LOCAL_USER_ID,
+        conversation_id=body.conversation_id,
+    )
+    return {
+        "id": None if opened.conversation_id is None else str(opened.conversation_id),
+        "messages": opened.messages,
     }
 
 

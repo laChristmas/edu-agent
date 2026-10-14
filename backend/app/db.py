@@ -198,6 +198,17 @@ async def ensure_schema(pool: asyncpg.Pool) -> None:
             CHECK (ease >= 1.3)
             """
         )
+        # 简报和普通回复要能分开。再次打开时只替换还没被回复的那一条。
+        await connection.execute(
+            "ALTER TABLE messages ADD COLUMN IF NOT EXISTS kind text NOT NULL DEFAULT 'chat'"
+        )
+        await connection.execute("ALTER TABLE messages DROP CONSTRAINT IF EXISTS messages_kind_check")
+        await connection.execute(
+            """
+            ALTER TABLE messages ADD CONSTRAINT messages_kind_check
+            CHECK (kind IN ('chat', 'briefing'))
+            """
+        )
 
 
 async def create_pool(settings: Settings) -> asyncpg.Pool:

@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, PointerEvent as ReactPointerEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, PointerEvent as ReactPointerEvent, useCallback, useEffect, useRef, useState } from "react";
 
 import MessageBody from "./message-body";
 import ProfilePanel from "./profile-panel";
@@ -34,62 +34,64 @@ export default function ChatPage() {
   const resizeDrag = useRef<{ y: number; height: number } | null>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
 
-  function rememberConversation(id: string) {
-    setConversationId(id);
-    localStorage.setItem(CONVERSATION_KEY, id);
-  }
+  const openDialog = useCallback(async (saved: string | null) => {
+    setRestoring(true);
+    setError("");
+    try {
+      const response = await fetch(`${API_BASE}/briefing`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ conversation_id: saved }),
+      });
+      if (saved && (response.status === 404 || response.status === 422)) {
+        localStorage.removeItem(CONVERSATION_KEY);
+        await openDialog(null);
+        return;
+      }
+      if (!response.ok) {
+        setError("简报没有写成");
+        if (saved) {
+          const fallback = await fetch(`${API_BASE}/conversations/${saved}/messages`);
+          if (fallback.ok) {
+            const previous = (await fallback.json()) as { id: string; messages: ChatMessage[] };
+            setConversationId(previous.id);
+            localStorage.setItem(CONVERSATION_KEY, previous.id);
+            setMessages(previous.messages);
+          }
+        }
+        return;
+      }
+      const body = (await response.json()) as { id: string | null; messages: ChatMessage[] };
+      if (body.id) {
+        setConversationId(body.id);
+        localStorage.setItem(CONVERSATION_KEY, body.id);
+      } else {
+        setConversationId(null);
+        localStorage.removeItem(CONVERSATION_KEY);
+      }
+      setMessages(body.messages);
+    } catch {
+      setError("简报没有写成");
+    } finally {
+      setRestoring(false);
+    }
+  }, []);
 
   function startNew() {
     if (sending || restoring) {
       return;
     }
-    // 只放下这一段的本地指针。已落库的原文仍留在库里。
+    // 放下这一段的本地指针后再打开。已落库的原文仍留在库里。
     setMessages([]);
     setConversationId(null);
-    setError("");
     localStorage.removeItem(CONVERSATION_KEY);
+    void openDialog(null);
   }
 
   useEffect(() => {
     const saved = localStorage.getItem(CONVERSATION_KEY);
-    if (!saved) {
-      setRestoring(false);
-      return;
-    }
-
-    let cancelled = false;
-    (async () => {
-      try {
-        const response = await fetch(`${API_BASE}/conversations/${saved}/messages`);
-        if (response.status === 404 || response.status === 422) {
-          localStorage.removeItem(CONVERSATION_KEY);
-          return;
-        }
-        if (!response.ok) {
-          setConversationId(saved);
-          setError("会话没有恢复");
-          return;
-        }
-        const body = (await response.json()) as { id: string; messages: ChatMessage[] };
-        if (cancelled) {
-          return;
-        }
-        setConversationId(body.id);
-        setMessages(body.messages);
-      } catch {
-        setConversationId(saved);
-        setError("会话没有恢复");
-      } finally {
-        if (!cancelled) {
-          setRestoring(false);
-        }
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    void openDialog(saved);
+  }, [openDialog]);
 
   useEffect(() => {
     const node = messagesRef.current;
