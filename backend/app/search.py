@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import tomllib
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -21,6 +22,7 @@ with _CONFIG_PATH.open("rb") as config_file:
 
 _SEARCH = _RULES["search"]
 SEARCH_PROMPT = str(_SEARCH["search_prompt"]).strip()
+REPLY_PROMPT = str(_SEARCH["reply_prompt"]).strip()
 TIME_LABELS = [str(item) for item in _SEARCH["time_labels"]]
 _TIMEZONE = str(_RULES["profile"]["default_timezone"])
 # 上周在方案里就是近 7 天，不按自然周切。模型若照原话写，这里收成配置里的词。
@@ -34,6 +36,18 @@ _TIME_ALIASES = {
     "这周": "本周",
     "这个星期": "本周",
     "这个月": "本月",
+}
+_CN_DIGIT = {
+    "一": 1,
+    "二": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+    "十": 10,
 }
 
 
@@ -162,6 +176,174 @@ async def narrow_mistakes(
         }
         for row in rows
     ]
+
+
+async def prepare_mistake_lookup(
+    pool: asyncpg.Pool,
+    client: httpx.AsyncClient,
+    settings: Settings,
+    *,
+    user_id: UUID,
+    conversation_id: UUID,
+    user_text: str,
+) -> str | None:
+    """多题只准备短列表，点名或只命中一道时才准备展开。普通讲题返回空。"""
+    text = user_text.strip()
+    if not _looks_like_lookup(text):
+        return None
+    picked = _named_index(text)
+    if picked is not None:
+        listed = await _load_list(pool, conversation_id, user_id)
+        if listed:
+            position = len(listed) if picked < 0 else picked
+            if position < 1 or position > len(listed):
+                return _reply(f"刚才的列表只有 {len(listed)} 道，没有第 {position} 道。")
+            detail = await _load_mistake(pool, user_id, listed[position - 1])
+            if detail is None:
+                return _reply("点到的那道错题已经不在了。")
+            return _reply(_open_body(detail))
+    filters = await parse_search_filters(client, settings, text)
+    if not filters.narrows():
+        return None
+    rows = await narrow_mistakes(pool, user_id, filters)
+    if not rows:
+        return _reply("没有命中已记下的错题。")
+    if len(rows) == 1:
+        detail = await _load_mistake(pool, user_id, rows[0]["id"])
+        if detail is None:
+            return _reply("没有命中已记下的错题。")
+        await _remember(pool, conversation_id, user_id, [detail["id"]])
+        return _reply(_open_body(detail))
+    await _remember(pool, conversation_id, user_id, [row["id"] for row in rows])
+    return _reply(_list_body(rows))
+
+
+def _looks_like_lookup(text: str) -> bool:
+    """点名常说「那道」或「第几道」。条件若是空的，调用方会照常讲。"""
+    if "错题" in text:
+        return True
+    if _named_index(text) is not None:
+        return True
+    return re.search(r"那[道题]", text) is not None
+
+
+def _named_index(text: str) -> int | None:
+    """点名从 1 起。返回 -1 表示最后一道。"""
+    match = re.search(r"第\s*([0-9]{1,2}|[一二三四五六七八九]|十)\s*[道题条个]", text)
+    if match:
+        token = match.group(1)
+        number = int(token) if token.isdigit() else _CN_DIGIT[token]
+        if number >= 1:
+            return number
+    if "最后一道" in text or "最后一题" in text:
+        return -1
+    return None
+
+
+def _reply(body: str) -> str:
+    return f"{REPLY_PROMPT}\n{body}"
+
+
+def _list_body(rows: list[dict]) -> str:
+    lines = ["命中了多道，按这个顺序只报时间、错因和题干首句。"]
+    for index, row in enumerate(rows, start=1):
+        lines.append(
+            f"{index}. {_day_label(row['created_on'])}，错因{_error_label(row['error_type'])}，"
+            f"题干：{_first_sentence(row['stem'])}"
+        )
+    return "\n".join(lines)
+
+
+def _open_body(detail: dict) -> str:
+    reference = detail["reference_answer"] or "（没有记下）"
+    student = detail["student_answer"] or "（没有记下）"
+    return "\n".join(
+        [
+            "展开这一道记下的内容。",
+            f"时间：{_day_label(detail['created_on'])}",
+            f"题干：{detail['stem'] or '（没有题干）'}",
+            f"学生答案：{student}",
+            f"参考答案：{reference}",
+            f"错因：{_error_label(detail['error_type'])}",
+        ]
+    )
+
+
+def _first_sentence(stem: str | None) -> str:
+    text = (stem or "").strip()
+    if not text:
+        return "（没有题干）"
+    sentence = re.split(r"[。！？\n]", text, maxsplit=1)[0].strip() or text
+    if len(sentence) > 80:
+        return sentence[:80] + "…"
+    return sentence
+
+
+def _error_label(error_type: str | None) -> str:
+    return error_type or "未记下"
+
+
+def _day_label(day: date) -> str:
+    return f"{day.month}月{day.day}日"
+
+
+async def _load_list(pool: asyncpg.Pool, conversation_id: UUID, user_id: UUID) -> list[UUID]:
+    rows = await pool.fetch(
+        """
+        SELECT mistake_id
+        FROM mistake_list_items
+        WHERE conversation_id = $1 AND user_id = $2
+        ORDER BY position
+        """,
+        conversation_id,
+        user_id,
+    )
+    return [row["mistake_id"] for row in rows]
+
+
+async def _remember(
+    pool: asyncpg.Pool,
+    conversation_id: UUID,
+    user_id: UUID,
+    mistake_ids: list[UUID],
+) -> None:
+    async with pool.acquire() as connection:
+        async with connection.transaction():
+            await connection.execute(
+                "DELETE FROM mistake_list_items WHERE conversation_id = $1",
+                conversation_id,
+            )
+            await connection.executemany(
+                """
+                INSERT INTO mistake_list_items (conversation_id, position, mistake_id, user_id)
+                VALUES ($1, $2, $3, $4)
+                """,
+                [
+                    (conversation_id, index, mistake_id, user_id)
+                    for index, mistake_id in enumerate(mistake_ids, start=1)
+                ],
+            )
+
+
+async def _load_mistake(pool: asyncpg.Pool, user_id: UUID, mistake_id: UUID) -> dict | None:
+    row = await pool.fetchrow(
+        """
+        SELECT
+            id,
+            stem,
+            student_answer,
+            reference_answer,
+            error_type,
+            (created_at AT TIME ZONE 'Asia/Shanghai')::date AS created_on
+        FROM mistakes
+        WHERE id = $1 AND user_id = $2
+        """,
+        mistake_id,
+        user_id,
+    )
+    if row is None:
+        return None
+    return dict(row)
 
 
 def _normalize(raw, today: date) -> MistakeFilters:

@@ -34,6 +34,7 @@ def tutor_messages(
     archive: list[dict[str, str]] | None = None,
     *,
     ask_grade: bool = False,
+    mistake_note: str | None = None,
 ) -> list[dict[str, str]]:
     """家教提示放在最前，并附上讲法画像和可口述的档案。这段提示不写入会话表。"""
     parts = [TUTOR_PROMPT]
@@ -42,4 +43,7 @@ def tutor_messages(
     if archive is not None:
         parts.append(f"{ARCHIVE_PROMPT}\n{_fact_lines(archive)}")
     parts.append(GRADE_ASK_PROMPT if ask_grade else GRADE_KNOWN_PROMPT)
+    # 检索结果放在最后，避免家教按默认讲法把多道题展开。
+    if mistake_note:
+        parts.append(mistake_note)
     return [{"role": "system", "content": "\n\n".join(parts)}, *recent_rounds(history)]

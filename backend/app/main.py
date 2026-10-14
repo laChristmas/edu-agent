@@ -26,6 +26,7 @@ from app.db import LOCAL_USER_ID, create_pool, ensure_schema, pgvector_version
 from app.extract import extract_turn
 from app.memory import active_facts, confirm_facts, list_profile, teaching_facts
 from app.mistakes import list_mistakes, record_turn
+from app.search import prepare_mistake_lookup
 
 logger = logging.getLogger("eduagent")
 
@@ -169,16 +170,30 @@ async def chat(body: ChatIn):
         user_message_id = None
         try:
             user_message_id = await save_message(pool, conversation_id, "user", body.content)
+            yield sse({"type": "conversation", "id": str(conversation_id)})
             facts = await teaching_facts(pool, LOCAL_USER_ID)
             archive = await active_facts(pool, LOCAL_USER_ID)
             ask_grade = not any(fact["dimension"] == "身份" and fact["key"] == "年级" for fact in archive)
+            mistake_note = None
+            try:
+                # 像在找错题时才检索。失败就照常讲，不挡住这一轮。
+                mistake_note = await prepare_mistake_lookup(
+                    pool,
+                    app.state.http,
+                    settings,
+                    user_id=LOCAL_USER_ID,
+                    conversation_id=conversation_id,
+                    user_text=body.content,
+                )
+            except Exception:
+                logger.exception("错题检索失败")
             messages = tutor_messages(
                 await load_messages(pool, conversation_id),
                 facts,
                 archive,
                 ask_grade=ask_grade,
+                mistake_note=mistake_note,
             )
-            yield sse({"type": "conversation", "id": str(conversation_id)})
             async for delta in stream_tutor(app.state.http, settings, messages):
                 parts.append(delta)
                 yield sse({"type": "delta", "text": delta})

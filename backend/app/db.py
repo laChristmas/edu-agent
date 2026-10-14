@@ -160,6 +160,19 @@ async def ensure_schema(pool: asyncpg.Pool) -> None:
             """,
             LOCAL_USER_ID,
         )
+        # 多题先留一个顺序，下一句点名时才知道「第二道」是哪条。删错题或会话时一起去掉。
+        await connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS mistake_list_items (
+                conversation_id uuid NOT NULL REFERENCES conversations (id) ON DELETE CASCADE,
+                position integer NOT NULL CHECK (position >= 1),
+                mistake_id uuid NOT NULL,
+                user_id uuid NOT NULL,
+                PRIMARY KEY (conversation_id, position),
+                FOREIGN KEY (mistake_id, user_id) REFERENCES mistakes (id, user_id) ON DELETE CASCADE
+            )
+            """
+        )
 
 
 async def create_pool(settings: Settings) -> asyncpg.Pool:
