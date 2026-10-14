@@ -1,4 +1,5 @@
 import logging
+import re
 import tomllib
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -28,6 +29,9 @@ WEAK_EVIDENCE_DAYS = int(_DAILY["weak_evidence_days"])
 DUE_PHRASES = tuple(str(item) for item in _DAILY["due_phrases"])
 DUE_PROMPT = str(_DAILY["due_prompt"]).strip()
 BRIEFING_PROMPT = str(_DAILY["briefing_prompt"]).strip()
+POINT_PROMPT = str(_DAILY["point_prompt"]).strip()
+START_PHRASES = frozenset(str(item) for item in _DAILY["start_phrases"])
+_ITEM_INDEX = {"一": 1, "二": 2, "三": 3}
 
 
 @dataclass(frozen=True)
@@ -109,7 +113,7 @@ async def open_briefing(
         return OpenedDialog(conversation_id, messages)
     if conversation_id is None:
         conversation_id = await create_conversation(pool)
-    replaced = await _store_briefing(pool, conversation_id, text)
+    replaced = await _store_briefing(pool, conversation_id, user_id, text, selection)
     logger.info("打开前简报：%s", "替换未回复的一条" if replaced else "新写一条")
     return OpenedDialog(conversation_id, await load_messages(pool, conversation_id))
 
@@ -292,7 +296,60 @@ async def _compose_briefing(
     return text
 
 
-async def _store_briefing(pool: asyncpg.Pool, conversation_id: UUID, text: str) -> bool:
+async def prepare_briefing_lesson(
+    pool: asyncpg.Pool,
+    *,
+    user_id: UUID,
+    conversation_id: UUID,
+    user_text: str,
+    open_mistake,
+) -> str | None:
+    """说开始或点明一件才准备讲解。没有简报、或这句话不是在接简报时，交给原来的对话。"""
+    target = await _resolve_target(pool, user_id, conversation_id, user_text.strip())
+    if target is None:
+        return None
+    if target.status == "missing":
+        return _hold(f"这次简报只有 {target.total} 件，没有第 {target.position} 件。")
+    if target.status == "ambiguous":
+        return _hold("点到了不止一件。请学生说第几件，或点名其中一件。")
+    if target.mistake_id is not None:
+        note = await open_mistake(target.mistake_id, target.position)
+        if note is None:
+            return _hold("这件错题已经不在了。")
+        logger.info("简报接续：第 %s 件错题", target.position)
+        return note
+    await pool.execute(
+        "DELETE FROM mistake_list_items WHERE conversation_id = $1 AND user_id = $2",
+        conversation_id,
+        user_id,
+    )
+    score = await pool.fetchval(
+        """
+        SELECT ma.score
+        FROM mastery ma
+        JOIN knowledge_points k ON k.id = ma.knowledge_point_id AND k.user_id = ma.user_id
+        WHERE ma.user_id = $1 AND k.name = $2
+        """,
+        user_id,
+        target.point_name,
+    )
+    logger.info("简报接续：第 %s 件知识点 %s", target.position, target.point_name)
+    shown = "未记" if score is None else score
+    return (
+        f"{POINT_PROMPT}\n"
+        f"这是简报里的第 {target.position} 件，只讲这一件。\n"
+        f"知识点：{target.point_name}\n"
+        f"掌握度：{shown}"
+    )
+
+
+async def _store_briefing(
+    pool: asyncpg.Pool,
+    conversation_id: UUID,
+    user_id: UUID,
+    text: str,
+    selection: DailySelection,
+) -> bool:
     """最后一条若仍是没被回复的简报，就改写它。已经接过话就另写一条。"""
     async with pool.acquire() as connection:
         async with connection.transaction():
@@ -307,17 +364,22 @@ async def _store_briefing(pool: asyncpg.Pool, conversation_id: UUID, text: str) 
                     last_id,
                     text,
                 )
-                return True
-            await connection.execute(
-                """
-                INSERT INTO messages (id, conversation_id, role, content, kind)
-                VALUES ($1, $2, 'assistant', $3, 'briefing')
-                """,
-                uuid4(),
-                conversation_id,
-                text,
-            )
-    return False
+                message_id = last_id
+                replaced = True
+            else:
+                message_id = uuid4()
+                await connection.execute(
+                    """
+                    INSERT INTO messages (id, conversation_id, role, content, kind)
+                    VALUES ($1, $2, 'assistant', $3, 'briefing')
+                    """,
+                    message_id,
+                    conversation_id,
+                    text,
+                )
+                replaced = False
+            await _replace_items(connection, message_id, user_id, selection)
+    return replaced
 
 
 async def _drop_pending_briefing(pool: asyncpg.Pool, conversation_id: UUID) -> None:
@@ -332,6 +394,147 @@ async def _drop_pending_briefing(pool: asyncpg.Pool, conversation_id: UUID) -> N
             if last_id is None:
                 return
             await connection.execute("DELETE FROM messages WHERE id = $1 AND kind = 'briefing'", last_id)
+
+
+async def _replace_items(
+    connection: asyncpg.Connection,
+    message_id: UUID,
+    user_id: UUID,
+    selection: DailySelection,
+) -> None:
+    await connection.execute("DELETE FROM briefing_items WHERE message_id = $1", message_id)
+    position = 1
+    for item in selection.mistakes:
+        await connection.execute(
+            """
+            INSERT INTO briefing_items (message_id, position, user_id, mistake_id)
+            VALUES ($1, $2, $3, $4)
+            """,
+            message_id,
+            position,
+            user_id,
+            item.id,
+        )
+        position += 1
+    if selection.weak_point is not None:
+        await connection.execute(
+            """
+            INSERT INTO briefing_items (message_id, position, user_id, point_name)
+            VALUES ($1, $2, $3, $4)
+            """,
+            message_id,
+            position,
+            user_id,
+            selection.weak_point.name,
+        )
+
+
+@dataclass(frozen=True)
+class _Target:
+    status: str
+    position: int = 0
+    total: int = 0
+    mistake_id: UUID | None = None
+    point_name: str | None = None
+    labels: tuple[str, ...] = ()
+
+
+async def _resolve_target(
+    pool: asyncpg.Pool,
+    user_id: UUID,
+    conversation_id: UUID,
+    text: str,
+) -> _Target | None:
+    message_id = await pool.fetchval(
+        """
+        SELECT id FROM messages
+        WHERE conversation_id = $1 AND kind = 'briefing'
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+        """,
+        conversation_id,
+    )
+    if message_id is None:
+        return None
+    rows = await pool.fetch(
+        """
+        SELECT
+            bi.position,
+            bi.mistake_id,
+            bi.point_name,
+            m.stem,
+            COALESCE(
+                array_agg(DISTINCT k.name) FILTER (WHERE k.name IS NOT NULL),
+                ARRAY[]::text[]
+            ) AS points
+        FROM briefing_items bi
+        LEFT JOIN mistakes m
+            ON m.id = bi.mistake_id AND m.user_id = bi.user_id
+        LEFT JOIN mistake_points mp
+            ON mp.mistake_id = m.id AND mp.user_id = bi.user_id
+        LEFT JOIN knowledge_points k
+            ON k.id = mp.knowledge_point_id AND k.user_id = bi.user_id
+        WHERE bi.message_id = $1 AND bi.user_id = $2
+        GROUP BY bi.position, bi.mistake_id, bi.point_name, m.stem
+        ORDER BY bi.position
+        """,
+        message_id,
+        user_id,
+    )
+    items = tuple(_target_from_row(row) for row in rows)
+    if not items:
+        return None
+    index = _explicit_index(text)
+    if index is not None:
+        if index < 1 or index > len(items):
+            return _Target(status="missing", position=index, total=len(items))
+        return items[index - 1]
+    hits = [item for item in items if _label_hit(text, item)]
+    if len(hits) > 1:
+        return _Target(status="ambiguous", total=len(items))
+    if len(hits) == 1:
+        return hits[0]
+    if _bare_start(text):
+        return items[0]
+    return None
+
+
+def _target_from_row(row) -> _Target:
+    labels: list[str] = []
+    if row["point_name"]:
+        labels.append(str(row["point_name"]))
+    labels.extend(str(name) for name in row["points"] if name)
+    stem = (row["stem"] or "").strip()
+    if len(stem) >= 4:
+        labels.append(stem)
+    return _Target(
+        status="ready",
+        position=int(row["position"]),
+        mistake_id=row["mistake_id"],
+        point_name=row["point_name"],
+        labels=tuple(labels),
+    )
+
+
+def _explicit_index(text: str) -> int | None:
+    match = re.search(r"第\s*([0-9]{1,2}|[一二三])\s*[件道题条个]", text)
+    if match is None:
+        return None
+    token = match.group(1)
+    return int(token) if token.isdigit() else _ITEM_INDEX[token]
+
+
+def _bare_start(text: str) -> bool:
+    stripped = text.strip("。！？!?\n 「」\"'")
+    return stripped in START_PHRASES
+
+
+def _label_hit(text: str, item: _Target) -> bool:
+    return any(len(label) >= 2 and label in text for label in item.labels)
+
+
+def _hold(text: str) -> str:
+    return f"学生在接简报，但这一步还不能讲。\n{text}\n不要开始讲解，不要编造题目。"
 
 
 async def _pending_briefing_id(connection: asyncpg.Connection, conversation_id: UUID) -> UUID | None:

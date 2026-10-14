@@ -12,7 +12,7 @@ import asyncpg
 import httpx
 
 from app.config import Settings
-from app.daily import prepare_due_note
+from app.daily import prepare_briefing_lesson, prepare_due_note
 from app.mastery import apply_review_rows, local_today, review_moment
 from app.mistakes import ERROR_TYPE_LIST, ERROR_TYPES
 
@@ -215,6 +215,24 @@ async def prepare_mistake_lookup(
     due_note = await prepare_due_note(pool, user_id, text)
     if due_note is not None:
         return due_note
+    async def open_mistake(mistake_id: UUID, position: int) -> str | None:
+        detail = await _load_mistake(pool, user_id, mistake_id)
+        if detail is None:
+            return None
+        await _remember(pool, conversation_id, user_id, [detail["id"]])
+        return _reply(
+            f"这是简报里的第 {position} 件，只讲这一件，不要讲其他件。\n{_open_body(detail)}"
+        )
+
+    lesson = await prepare_briefing_lesson(
+        pool,
+        user_id=user_id,
+        conversation_id=conversation_id,
+        user_text=text,
+        open_mistake=open_mistake,
+    )
+    if lesson is not None:
+        return lesson
     if not _looks_like_lookup(text):
         return None
     picked = _named_index(text)

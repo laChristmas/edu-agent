@@ -209,6 +209,28 @@ async def ensure_schema(pool: asyncpg.Pool) -> None:
             CHECK (kind IN ('chat', 'briefing'))
             """
         )
+        # 简报上的条目留住，学生说开始或点名时才知道讲哪一件。
+        await connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS briefing_items (
+                message_id uuid NOT NULL REFERENCES messages (id) ON DELETE CASCADE,
+                position integer NOT NULL CHECK (position >= 1),
+                user_id uuid NOT NULL,
+                mistake_id uuid,
+                point_name text,
+                PRIMARY KEY (message_id, position),
+                CHECK (
+                    (mistake_id IS NOT NULL AND point_name IS NULL)
+                    OR (
+                        mistake_id IS NULL
+                        AND point_name IS NOT NULL
+                        AND length(btrim(point_name)) > 0
+                    )
+                ),
+                FOREIGN KEY (mistake_id, user_id) REFERENCES mistakes (id, user_id) ON DELETE CASCADE
+            )
+            """
+        )
 
 
 async def create_pool(settings: Settings) -> asyncpg.Pool:
