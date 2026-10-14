@@ -12,6 +12,7 @@ import asyncpg
 import httpx
 
 from app.config import Settings
+from app.mastery import apply_review_rows, local_today, review_moment
 from app.mistakes import ERROR_TYPE_LIST, ERROR_TYPES
 
 logger = logging.getLogger("eduagent.search")
@@ -196,7 +197,8 @@ async def prepare_mistake_lookup(
 ) -> str | None:
     """多题只准备短列表。点名或只命中一道时按错因准备重讲。问最多的错因就计数，标成会了才写入。"""
     text = user_text.strip()
-    if _wants_mastered(text):
+    outcome = _review_outcome(text)
+    if outcome is not None:
         return await _prepare_mastered(
             pool,
             client,
@@ -205,6 +207,7 @@ async def prepare_mistake_lookup(
             conversation_id=conversation_id,
             user_text=text,
             source_message_id=source_message_id,
+            outcome=outcome,
         )
     if _looks_like_stats(text):
         return await _prepare_stats(pool, user_id)
@@ -241,6 +244,19 @@ async def prepare_mistake_lookup(
 
 def _looks_like_stats(text: str) -> bool:
     return any(phrase in text for phrase in ("哪类错", "哪一种错", "错得最多", "错最多", "错因最多"))
+
+
+def _review_outcome(text: str) -> str | None:
+    """四种说法才写入复习。反问「会了吗」和「还不会」都不算。"""
+    if "又忘了" in text:
+        return "又忘了"
+    if "很熟" in text:
+        return "很熟"
+    if "勉强会" in text:
+        return "勉强会"
+    if _wants_mastered(text):
+        return "会了"
+    return None
 
 
 def _wants_mastered(text: str) -> bool:
@@ -281,19 +297,23 @@ async def _prepare_mastered(
     conversation_id: UUID,
     user_text: str,
     source_message_id: UUID | None,
+    outcome: str,
 ) -> str:
-    """点名或只剩一道才标。昨天有多道时标最近的一条，没有目标就不猜。"""
+    """点名或只剩一道才记。昨天有多道时记最近的一条，没有目标就不猜。"""
     picked = _named_index(user_text)
     if picked is not None:
         listed = await _load_list(pool, conversation_id, user_id)
         if listed:
             position = len(listed) if picked < 0 else picked
             if position < 1 or position > len(listed):
-                return _mark_note(f"刚才的列表只有 {len(listed)} 道，没有第 {position} 道。这一步没有标。")
-            return await _mark_and_note(pool, user_id, listed[position - 1], source_message_id)
+                return _mark_note(f"刚才的列表只有 {len(listed)} 道，没有第 {position} 道。这一步没有记。")
+            return await _mark_and_note(
+                pool, user_id, listed[position - 1], source_message_id, outcome
+            )
     filters = await parse_search_filters(client, settings, user_text)
     logger.info(
-        "标成会了条件：subject=%s points=%s error=%s time=%s",
+        "复习结果 %s：subject=%s points=%s error=%s time=%s",
+        outcome,
         filters.subject,
         filters.knowledge_points,
         filters.error_type,
@@ -302,20 +322,20 @@ async def _prepare_mastered(
     if filters.narrows():
         rows = await narrow_mistakes(pool, user_id, filters)
         if not rows:
-            return _mark_note("没有找到要标的那一道。请学生说清是哪一道。这一步没有标。")
+            return _mark_note("没有找到要记的那一道。请学生说清是哪一道。这一步没有记。")
         if len(rows) == 1 or filters.time_label or "那道" in user_text or "那题" in user_text:
             if len(rows) > 1:
-                note = await _mark_and_note(pool, user_id, rows[0]["id"], source_message_id)
-                return note + "\n符合的有多道，标的是最近的这一道。"
-            return await _mark_and_note(pool, user_id, rows[0]["id"], source_message_id)
+                note = await _mark_and_note(pool, user_id, rows[0]["id"], source_message_id, outcome)
+                return note + "\n符合的有多道，记的是最近的这一道。"
+            return await _mark_and_note(pool, user_id, rows[0]["id"], source_message_id, outcome)
         await _remember(pool, conversation_id, user_id, [row["id"] for row in rows])
-        return _mark_note("有多道符合，先不标。\n" + _list_body(rows))
+        return _mark_note("有多道符合，先不记。\n" + _list_body(rows))
     listed = await _load_list(pool, conversation_id, user_id)
     if len(listed) == 1:
-        return await _mark_and_note(pool, user_id, listed[0], source_message_id)
+        return await _mark_and_note(pool, user_id, listed[0], source_message_id, outcome)
     if len(listed) > 1:
-        return _mark_note("刚才列出了多道。请学生点名第几道。这一步没有标。")
-    return _mark_note("没有确定是哪一道。请学生点明题目或时间。这一步没有标。")
+        return _mark_note("刚才列出了多道。请学生点名第几道。这一步没有记。")
+    return _mark_note("没有确定是哪一道。请学生点明题目或时间。这一步没有记。")
 
 
 def _mark_note(body: str) -> str:
@@ -327,16 +347,21 @@ async def _mark_and_note(
     user_id: UUID,
     mistake_id: UUID,
     source_message_id: UUID | None,
+    outcome: str,
 ) -> str:
     detail = await _load_mistake(pool, user_id, mistake_id)
     if detail is None:
-        return _mark_note("没有找到要标的那一道。这一步没有标。")
-    if detail["status"] == MASTERED_STATUS:
-        return _mark_note(
-            "这道已经标成会了，没有重复写入。\n" + _mark_detail(detail)
-        )
+        return _mark_note("没有找到要记的那一道。这一步没有记。")
+    today = local_today()
     async with pool.acquire() as connection:
         async with connection.transaction():
+            update = await apply_review_rows(
+                connection,
+                user_id=user_id,
+                mistake_id=mistake_id,
+                outcome=outcome,
+                today=today,
+            )
             await connection.execute(
                 """
                 INSERT INTO mistake_reviews (
@@ -347,27 +372,32 @@ async def _mark_and_note(
                 uuid4(),
                 user_id,
                 mistake_id,
-                MASTERED_OUTCOME,
+                outcome,
                 source_message_id,
             )
             await connection.execute(
                 """
                 UPDATE mistakes
-                SET status = $3, next_review_at = NULL
+                SET status = $3, next_review_at = $4
                 WHERE id = $1 AND user_id = $2
                 """,
                 mistake_id,
                 user_id,
-                MASTERED_STATUS,
+                update.status,
+                review_moment(update.next_review_on),
             )
-    detail["status"] = MASTERED_STATUS
-    logger.info("标成会了：%s", mistake_id)
-    return _mark_note("已经标成会了，并移出到期复习。\n" + _mark_detail(detail))
+    detail["status"] = update.status
+    logger.info("复习结果 %s：%s 天后", outcome, update.interval_days)
+    return _mark_note(_review_body(detail, outcome, update))
 
 
-def _mark_detail(detail: dict) -> str:
+def _review_body(detail: dict, outcome: str, update) -> str:
     return "\n".join(
         [
+            f"结果：{outcome}",
+            f"下次复习：{_day_label(update.next_review_on)}",
+            f"间隔：{update.interval_days} 天",
+            f"掌握度：{update.score}",
             f"时间：{_day_label(detail['created_on'])}",
             f"题干：{_first_sentence(detail['stem'])}",
             f"错因：{_error_label(detail['error_type'])}",

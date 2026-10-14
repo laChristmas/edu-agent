@@ -173,7 +173,7 @@ async def ensure_schema(pool: asyncpg.Pool) -> None:
             )
             """
         )
-        # 标成会了先留下结果。四种结果的间隔留到后面，这一步只写入「会了」。
+        # 标成会了留下结果。间隔由掌握度上的 SM-2 决定，不在这张表里重算。
         await connection.execute(
             """
             CREATE TABLE IF NOT EXISTS mistake_reviews (
@@ -185,6 +185,17 @@ async def ensure_schema(pool: asyncpg.Pool) -> None:
                 created_at timestamptz NOT NULL DEFAULT now(),
                 FOREIGN KEY (mistake_id, user_id) REFERENCES mistakes (id, user_id) ON DELETE CASCADE
             )
+            """
+        )
+        # 已有掌握度补上难易系数。新错题还没复习过时用默认 2.5。
+        await connection.execute(
+            "ALTER TABLE mastery ADD COLUMN IF NOT EXISTS ease numeric(4, 2) NOT NULL DEFAULT 2.50"
+        )
+        await connection.execute("ALTER TABLE mastery DROP CONSTRAINT IF EXISTS mastery_ease_check")
+        await connection.execute(
+            """
+            ALTER TABLE mastery ADD CONSTRAINT mastery_ease_check
+            CHECK (ease >= 1.3)
             """
         )
 
