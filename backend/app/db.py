@@ -173,6 +173,20 @@ async def ensure_schema(pool: asyncpg.Pool) -> None:
             )
             """
         )
+        # 标成会了先留下结果。四种结果的间隔留到后面，这一步只写入「会了」。
+        await connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS mistake_reviews (
+                id uuid PRIMARY KEY,
+                user_id uuid NOT NULL,
+                mistake_id uuid NOT NULL,
+                outcome text NOT NULL CHECK (outcome IN ('又忘了', '勉强会', '会了', '很熟')),
+                source_message_id uuid REFERENCES messages (id) ON DELETE SET NULL,
+                created_at timestamptz NOT NULL DEFAULT now(),
+                FOREIGN KEY (mistake_id, user_id) REFERENCES mistakes (id, user_id) ON DELETE CASCADE
+            )
+            """
+        )
 
 
 async def create_pool(settings: Settings) -> asyncpg.Pool:

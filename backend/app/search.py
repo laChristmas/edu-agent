@@ -5,7 +5,7 @@ import tomllib
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
 import asyncpg
@@ -23,6 +23,10 @@ with _CONFIG_PATH.open("rb") as config_file:
 _SEARCH = _RULES["search"]
 SEARCH_PROMPT = str(_SEARCH["search_prompt"]).strip()
 REPLY_PROMPT = str(_SEARCH["reply_prompt"]).strip()
+STATS_PROMPT = str(_SEARCH["stats_prompt"]).strip()
+MARK_PROMPT = str(_SEARCH["mark_prompt"]).strip()
+MASTERED_STATUS = str(_SEARCH["mastered_status"])
+MASTERED_OUTCOME = str(_SEARCH["mastered_outcome"])
 RETEACH_DEFAULT = str(_SEARCH["reteach_default"]).strip()
 _RETEACH = {str(key): str(value).strip() for key, value in _SEARCH["reteach"].items()}
 TIME_LABELS = [str(item) for item in _SEARCH["time_labels"]]
@@ -188,9 +192,22 @@ async def prepare_mistake_lookup(
     user_id: UUID,
     conversation_id: UUID,
     user_text: str,
+    source_message_id: UUID | None = None,
 ) -> str | None:
-    """多题只准备短列表。点名或只命中一道时按错因准备重讲。普通讲题返回空。"""
+    """多题只准备短列表。点名或只命中一道时按错因准备重讲。问最多的错因就计数，标成会了才写入。"""
     text = user_text.strip()
+    if _wants_mastered(text):
+        return await _prepare_mastered(
+            pool,
+            client,
+            settings,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            user_text=text,
+            source_message_id=source_message_id,
+        )
+    if _looks_like_stats(text):
+        return await _prepare_stats(pool, user_id)
     if not _looks_like_lookup(text):
         return None
     picked = _named_index(text)
@@ -220,6 +237,143 @@ async def prepare_mistake_lookup(
         return _reply(_open_body(detail))
     await _remember(pool, conversation_id, user_id, [row["id"] for row in rows])
     return _reply(_list_body(rows))
+
+
+def _looks_like_stats(text: str) -> bool:
+    return any(phrase in text for phrase in ("哪类错", "哪一种错", "错得最多", "错最多", "错因最多"))
+
+
+def _wants_mastered(text: str) -> bool:
+    """只有学生明确说会了才写入。反问「会了吗」和「还不会」都不算。"""
+    if any(phrase in text for phrase in ("标成会了", "标为会了", "标记会了", "标成已会")):
+        return True
+    stripped = text.strip("。！？!?\n ")
+    return stripped in {"会了", "我会了", "这题会了", "这道会了", "这道我会了"}
+
+
+async def _prepare_stats(pool: asyncpg.Pool, user_id: UUID) -> str:
+    rows = await pool.fetch(
+        """
+        SELECT COALESCE(error_type, '未记下') AS kind, count(*)::int AS total
+        FROM mistakes
+        WHERE user_id = $1
+        GROUP BY 1
+        ORDER BY total DESC, kind
+        """,
+        user_id,
+    )
+    if not rows:
+        return f"{STATS_PROMPT}\n还没有记下的错题。"
+    top = rows[0]["total"]
+    leaders = [row["kind"] for row in rows if row["total"] == top]
+    lines = ["按错因计数："]
+    lines.extend(f"{row['kind']} {row['total']} 道" for row in rows)
+    lines.append("最多：" + "、".join(leaders))
+    return f"{STATS_PROMPT}\n" + "\n".join(lines)
+
+
+async def _prepare_mastered(
+    pool: asyncpg.Pool,
+    client: httpx.AsyncClient,
+    settings: Settings,
+    *,
+    user_id: UUID,
+    conversation_id: UUID,
+    user_text: str,
+    source_message_id: UUID | None,
+) -> str:
+    """点名或只剩一道才标。昨天有多道时标最近的一条，没有目标就不猜。"""
+    picked = _named_index(user_text)
+    if picked is not None:
+        listed = await _load_list(pool, conversation_id, user_id)
+        if listed:
+            position = len(listed) if picked < 0 else picked
+            if position < 1 or position > len(listed):
+                return _mark_note(f"刚才的列表只有 {len(listed)} 道，没有第 {position} 道。这一步没有标。")
+            return await _mark_and_note(pool, user_id, listed[position - 1], source_message_id)
+    filters = await parse_search_filters(client, settings, user_text)
+    logger.info(
+        "标成会了条件：subject=%s points=%s error=%s time=%s",
+        filters.subject,
+        filters.knowledge_points,
+        filters.error_type,
+        filters.time_label,
+    )
+    if filters.narrows():
+        rows = await narrow_mistakes(pool, user_id, filters)
+        if not rows:
+            return _mark_note("没有找到要标的那一道。请学生说清是哪一道。这一步没有标。")
+        if len(rows) == 1 or filters.time_label or "那道" in user_text or "那题" in user_text:
+            if len(rows) > 1:
+                note = await _mark_and_note(pool, user_id, rows[0]["id"], source_message_id)
+                return note + "\n符合的有多道，标的是最近的这一道。"
+            return await _mark_and_note(pool, user_id, rows[0]["id"], source_message_id)
+        await _remember(pool, conversation_id, user_id, [row["id"] for row in rows])
+        return _mark_note("有多道符合，先不标。\n" + _list_body(rows))
+    listed = await _load_list(pool, conversation_id, user_id)
+    if len(listed) == 1:
+        return await _mark_and_note(pool, user_id, listed[0], source_message_id)
+    if len(listed) > 1:
+        return _mark_note("刚才列出了多道。请学生点名第几道。这一步没有标。")
+    return _mark_note("没有确定是哪一道。请学生点明题目或时间。这一步没有标。")
+
+
+def _mark_note(body: str) -> str:
+    return f"{MARK_PROMPT}\n{body}"
+
+
+async def _mark_and_note(
+    pool: asyncpg.Pool,
+    user_id: UUID,
+    mistake_id: UUID,
+    source_message_id: UUID | None,
+) -> str:
+    detail = await _load_mistake(pool, user_id, mistake_id)
+    if detail is None:
+        return _mark_note("没有找到要标的那一道。这一步没有标。")
+    if detail["status"] == MASTERED_STATUS:
+        return _mark_note(
+            "这道已经标成会了，没有重复写入。\n" + _mark_detail(detail)
+        )
+    async with pool.acquire() as connection:
+        async with connection.transaction():
+            await connection.execute(
+                """
+                INSERT INTO mistake_reviews (
+                    id, user_id, mistake_id, outcome, source_message_id
+                )
+                VALUES ($1, $2, $3, $4, $5)
+                """,
+                uuid4(),
+                user_id,
+                mistake_id,
+                MASTERED_OUTCOME,
+                source_message_id,
+            )
+            await connection.execute(
+                """
+                UPDATE mistakes
+                SET status = $3, next_review_at = NULL
+                WHERE id = $1 AND user_id = $2
+                """,
+                mistake_id,
+                user_id,
+                MASTERED_STATUS,
+            )
+    detail["status"] = MASTERED_STATUS
+    logger.info("标成会了：%s", mistake_id)
+    return _mark_note("已经标成会了，并移出到期复习。\n" + _mark_detail(detail))
+
+
+def _mark_detail(detail: dict) -> str:
+    return "\n".join(
+        [
+            f"时间：{_day_label(detail['created_on'])}",
+            f"题干：{_first_sentence(detail['stem'])}",
+            f"错因：{_error_label(detail['error_type'])}",
+            f"状态：{detail['status']}",
+        ]
+    )
 
 
 def _looks_like_lookup(text: str) -> bool:
@@ -349,6 +503,7 @@ async def _load_mistake(pool: asyncpg.Pool, user_id: UUID, mistake_id: UUID) -> 
             m.student_answer,
             m.reference_answer,
             m.error_type,
+            m.status,
             (m.created_at AT TIME ZONE 'Asia/Shanghai')::date AS created_on,
             COALESCE(
                 (

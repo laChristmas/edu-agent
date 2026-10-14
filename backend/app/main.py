@@ -184,6 +184,7 @@ async def chat(body: ChatIn):
                     user_id=LOCAL_USER_ID,
                     conversation_id=conversation_id,
                     user_text=body.content,
+                    source_message_id=user_message_id,
                 )
             except Exception:
                 logger.exception("错题检索失败")
