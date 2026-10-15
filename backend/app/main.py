@@ -44,6 +44,7 @@ from app.images import (
 from app.memory import active_facts, confirm_facts, list_profile, teaching_facts
 from app.mistakes import PhotoReading, list_mistakes, read_photo, record_turn
 from app.search import prepare_mistake_lookup
+from app.web import prepare_web_lookup
 
 logger = logging.getLogger("eduagent")
 
@@ -349,6 +350,16 @@ async def chat(body: ChatIn):
                 )
             except Exception:
                 logger.exception("错题检索失败")
+            web_note = None
+            try:
+                # 只有会过时的事实才检索。失败就照常讲，不挡住这一轮。
+                web_note = await prepare_web_lookup(
+                    app.state.http,
+                    settings,
+                    user_text=body.content,
+                )
+            except Exception:
+                logger.exception("网页检索失败")
             if body.image_id is not None:
                 photo_note = _photo_note(photo_reading, photo_only=body.content == "（一张照片）")
                 mistake_note = f"{mistake_note}\n\n{photo_note}" if mistake_note else photo_note
@@ -358,6 +369,7 @@ async def chat(body: ChatIn):
                 archive,
                 ask_grade=ask_grade,
                 mistake_note=mistake_note,
+                web_note=web_note,
             )
             if photo is not None and photo_reading is not None:
                 messages = _with_photo(messages, photo[1], photo[0])
