@@ -72,7 +72,9 @@ class MistakeFilters:
     keywords: tuple[str, ...] = ()
 
     def narrows(self) -> bool:
-        return bool(self.subject or self.knowledge_points or self.error_type or self.since or self.until)
+        return bool(
+            self.subject or self.knowledge_points or self.error_type or self.since or self.until or self.keywords
+        )
 
 
 async def parse_search_filters(
@@ -81,7 +83,7 @@ async def parse_search_filters(
     user_text: str,
     today: date | None = None,
 ) -> MistakeFilters:
-    """把找错题的问句收成学科、知识点、错因和时间。普通讲题得到空条件。"""
+    """把找错题的问句收成学科、知识点、错因、时间和题干里的说法。普通讲题得到空条件。"""
     day = today or _local_today()
     allowed_errors = "、".join(ERROR_TYPE_LIST)
     allowed_times = "、".join(TIME_LABELS)
@@ -117,10 +119,12 @@ async def narrow_mistakes(
     user_id: UUID,
     filters: MistakeFilters,
 ) -> list[dict]:
-    """用学科、知识点、错因和时间收窄这个用户的错题。没有条件时不把整本都取出来。"""
+    """用学科、知识点、错因、时间和题干里的说法收窄。没有条件时不把整本都取出来。"""
     if not filters.narrows():
         return []
     patterns = [_contains_pattern(name) for name in filters.knowledge_points]
+    # 照片题的说法在题干里。知识点名称对不上时，仍能用题目里的词找回。
+    keyword_patterns = [_contains_pattern(word) for word in filters.keywords]
     rows = await pool.fetch(
         """
         SELECT
@@ -162,6 +166,14 @@ async def narrow_mistakes(
                       )
                 )
           )
+          AND (
+                cardinality($8::text[]) = 0
+                OR NOT EXISTS (
+                    SELECT 1 FROM unnest($8::text[]) AS kw(value)
+                    WHERE COALESCE(m.stem, '') NOT ILIKE kw.value ESCAPE '\\'
+                      AND COALESCE(m.raw_text, '') NOT ILIKE kw.value ESCAPE '\\'
+                )
+          )
         GROUP BY m.id
         ORDER BY m.created_at DESC, m.id
         """,
@@ -172,6 +184,7 @@ async def narrow_mistakes(
         filters.until,
         list(filters.knowledge_points),
         patterns,
+        keyword_patterns,
     )
     return [
         {
