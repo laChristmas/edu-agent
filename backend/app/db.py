@@ -251,6 +251,23 @@ async def ensure_schema(pool: asyncpg.Pool) -> None:
             )
             """
         )
+        # 复核意见先留下。这一轮的讲解已经发出，不在这里改口。
+        await connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS solution_checks (
+                id uuid PRIMARY KEY,
+                user_id uuid NOT NULL REFERENCES users (id),
+                conversation_id uuid NOT NULL REFERENCES conversations (id) ON DELETE CASCADE,
+                user_message_id uuid NOT NULL REFERENCES messages (id) ON DELETE CASCADE,
+                assistant_message_id uuid NOT NULL REFERENCES messages (id) ON DELETE CASCADE,
+                reason text NOT NULL CHECK (reason IN ('计算', '检查')),
+                verdict text NOT NULL CHECK (verdict IN ('通过', '有误', '看不出')),
+                step text,
+                note text NOT NULL CHECK (length(btrim(note)) > 0),
+                created_at timestamptz NOT NULL DEFAULT now()
+            )
+            """
+        )
 
 
 async def create_pool(settings: Settings) -> asyncpg.Pool:

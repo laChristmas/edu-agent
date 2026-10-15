@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, field_validator, model_validator
 
+from app.check import run_check
 from app.chat import (
     TurnInProgress,
     begin_turn,
@@ -300,8 +301,60 @@ async def chat(body: ChatIn):
         parts: list[str] = []
         assistant_saved = False
         user_message_id = None
+        assistant_message_id = None
         photo = None
         photo_reading: PhotoReading | None = None
+
+        async def _finish_turn() -> None:
+            nonlocal assistant_message_id, assistant_saved
+            if parts and not assistant_saved:
+                assistant_message_id = await save_message(pool, conversation_id, "assistant", "".join(parts))
+                assistant_saved = True
+            await end_turn(conversation_id)
+            # 画像、错题和复核都在回复落库之后另起任务，不占这条流式连接。
+            if user_message_id is not None and parts:
+                _spawn(
+                    extract_turn(
+                        pool,
+                        app.state.http,
+                        settings,
+                        user_id=LOCAL_USER_ID,
+                        user_message_id=user_message_id,
+                        user_text=body.content,
+                        assistant_text="".join(parts),
+                    )
+                )
+            if user_message_id is not None and assistant_message_id is not None:
+                # 这一轮已经说完。复核在后台看题目和关键步骤，不把意见插进刚发出的讲解。
+                _spawn(
+                    run_check(
+                        pool,
+                        app.state.http,
+                        settings,
+                        user_id=LOCAL_USER_ID,
+                        conversation_id=conversation_id,
+                        user_message_id=user_message_id,
+                        assistant_message_id=assistant_message_id,
+                        user_text=body.content,
+                        assistant_text="".join(parts),
+                    )
+                )
+            if user_message_id is not None:
+                _spawn(
+                    record_turn(
+                        pool,
+                        app.state.http,
+                        settings,
+                        user_id=LOCAL_USER_ID,
+                        conversation_id=conversation_id,
+                        user_message_id=user_message_id,
+                        user_text=body.content,
+                        assistant_text="".join(parts),
+                        saw_photo=body.image_id is not None,
+                        photo_reading=photo_reading,
+                    )
+                )
+
         try:
             user_message_id = await save_message(pool, conversation_id, "user", body.content)
             if body.image_id is not None:
@@ -377,43 +430,19 @@ async def chat(body: ChatIn):
                 parts.append(delta)
                 yield sse({"type": "delta", "text": delta})
             if parts:
-                await save_message(pool, conversation_id, "assistant", "".join(parts))
+                assistant_message_id = await save_message(pool, conversation_id, "assistant", "".join(parts))
                 assistant_saved = True
             yield sse({"type": "done"})
         finally:
-            # 客户端断开或模型中途失败时，仍留下已经生成的文字，并放开这一轮。
+            # 页面可能在字收齐后就断开。收尾独立出去，取消这一轮时复核仍然排得上。
+            tail = asyncio.create_task(_finish_turn())
             try:
-                if parts and not assistant_saved:
-                    await save_message(pool, conversation_id, "assistant", "".join(parts))
-            finally:
-                await end_turn(conversation_id)
-                # 画像和错题都在回复落库之后另起任务，不占这条流式连接。
-                if user_message_id is not None and parts:
-                    _spawn(
-                        extract_turn(
-                            pool,
-                            app.state.http,
-                            settings,
-                            user_id=LOCAL_USER_ID,
-                            user_message_id=user_message_id,
-                            user_text=body.content,
-                            assistant_text="".join(parts),
-                        )
-                    )
-                if user_message_id is not None:
-                    _spawn(
-                        record_turn(
-                            pool,
-                            app.state.http,
-                            settings,
-                            user_id=LOCAL_USER_ID,
-                            conversation_id=conversation_id,
-                            user_message_id=user_message_id,
-                            user_text=body.content,
-                            assistant_text="".join(parts),
-                            saw_photo=body.image_id is not None,
-                            photo_reading=photo_reading,
-                        )
-                    )
+                await asyncio.shield(tail)
+            except asyncio.CancelledError:
+                current = asyncio.current_task()
+                if current is not None:
+                    while current.uncancel():
+                        pass
+                await tail
 
     return StreamingResponse(events(), media_type="text/event-stream")
