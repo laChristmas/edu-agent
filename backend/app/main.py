@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import logging
 from contextlib import asynccontextmanager
 from uuid import UUID
@@ -25,9 +26,23 @@ from app.config import get_settings
 from app.daily import open_briefing
 from app.db import LOCAL_USER_ID, create_pool, ensure_schema, pgvector_version
 from app.extract import extract_turn
-from app.images import PHOTO_NOTE, attach_image, open_image, require_pending_image, save_image
+from app.images import (
+    PHOTO_AUTO_NOTE,
+    PHOTO_GRADE,
+    PHOTO_MISTAKE_NOTE,
+    PHOTO_OTHER,
+    PHOTO_PROBLEM,
+    PHOTO_STEPS,
+    PHOTO_UNREAD,
+    PHOTO_WITH_TEXT,
+    attach_image,
+    open_image,
+    read_image_bytes,
+    require_pending_image,
+    save_image,
+)
 from app.memory import active_facts, confirm_facts, list_profile, teaching_facts
-from app.mistakes import list_mistakes, record_turn
+from app.mistakes import PhotoReading, list_mistakes, read_photo, record_turn
 from app.search import prepare_mistake_lookup
 
 logger = logging.getLogger("eduagent")
@@ -64,6 +79,62 @@ def _spawn(coro) -> None:
             logger.error("后台任务失败", exc_info=done.exception())
 
     task.add_done_callback(_finished)
+
+
+def _photo_fields(reading: PhotoReading) -> str:
+    return (
+        f"题干：{reading.stem or '（无）'}\n"
+        f"解题过程：{reading.steps or '（无）'}\n"
+        f"解析：{reading.description or '（无）'}"
+    )
+
+
+def _photo_note(reading: PhotoReading | None, *, photo_only: bool) -> str:
+    """开口前带上照片解析。只发照片时按种类回复，说了记下才按错题讲。"""
+    if reading is None:
+        return PHOTO_UNREAD
+    parsed = reading.mistake
+    if parsed is not None:
+        points = "、".join(parsed.knowledge_points) or "（无）"
+        lead = PHOTO_AUTO_NOTE if reading.auto else PHOTO_MISTAKE_NOTE
+        return (
+            f"{lead}\n"
+            f"题干：{parsed.stem}\n"
+            f"学生答案：{parsed.student_answer or '（无）'}\n"
+            f"参考答案：{parsed.reference_answer or '（无）'}\n"
+            f"错因：{parsed.error_type or '（无）'}\n"
+            f"学科：{parsed.subject or '（无）'}\n"
+            f"知识点：{points}\n"
+            f"{_photo_fields(reading)}"
+        )
+    lead = {
+        "题目": PHOTO_PROBLEM,
+        "题目和解题过程": PHOTO_GRADE,
+        "解题过程": PHOTO_STEPS,
+        "其他": PHOTO_OTHER,
+    } if photo_only else {}
+    return f"{lead.get(reading.kind, PHOTO_WITH_TEXT)}\n{_photo_fields(reading)}"
+
+
+def _with_photo(messages: list[dict], media_type: str, data: bytes) -> list[dict]:
+    """解析之后仍把原图交给家教，避免整理时丢掉图上的细节。"""
+    if not messages or messages[-1].get("role") != "user":
+        return messages
+    text = messages[-1].get("content")
+    if not isinstance(text, str):
+        return messages
+    encoded = base64.b64encode(data).decode("ascii")
+    updated = list(messages)
+    updated[-1] = {
+        "role": "user",
+        "content": [
+            {"type": "image_url", "image_url": {"url": f"data:{media_type};base64,{encoded}"}},
+            {"type": "text", "text": text},
+        ],
+    }
+    return updated
+
+
 # 聊天页在另一个端口，只放开本机开发地址。
 app.add_middleware(
     CORSMiddleware,
@@ -99,7 +170,7 @@ class ChatIn(BaseModel):
 
     @model_validator(mode="after")
     def content_or_image(self) -> "ChatIn":
-        # 只发照片时没有文字。用一句固定说法留下这轮，识题以后再换成题干。
+        # 只发照片时没有文字。占位留在这句话里。题干只在记成错题时另写，不把照片换成题目。
         if not self.content and self.image_id is None:
             raise ValueError("内容不能为空")
         if not self.content:
@@ -182,7 +253,7 @@ async def upload_image(
     file: UploadFile = File(),
     conversation_id: UUID | None = Form(None),
 ):
-    """收下照片并挂到用户和会话。这一步不识题。"""
+    """收下照片并挂到用户和会话。是不是错题要等这句发出去再看。"""
     data = await file.read()
     image_id, saved_conversation, media_type = await save_image(
         app.state.pool,
@@ -228,10 +299,38 @@ async def chat(body: ChatIn):
         parts: list[str] = []
         assistant_saved = False
         user_message_id = None
+        photo = None
+        photo_reading: PhotoReading | None = None
         try:
             user_message_id = await save_message(pool, conversation_id, "user", body.content)
             if body.image_id is not None:
                 await attach_image(pool, body.image_id, conversation_id, user_message_id)
+                # 先解析照片内容。过程错了且题目适合当前年级时才记入错题。
+                try:
+                    photo = await read_image_bytes(pool, body.image_id)
+                    archive_for_grade = await active_facts(pool, LOCAL_USER_ID)
+                    grade = next(
+                        (
+                            fact["value"]
+                            for fact in archive_for_grade
+                            if fact["dimension"] == "身份" and fact["key"] == "年级" and fact["value"].strip()
+                        ),
+                        None,
+                    )
+                    photo_reading = await read_photo(
+                        app.state.http,
+                        settings,
+                        pool,
+                        conversation_id=conversation_id,
+                        user_message_id=user_message_id,
+                        user_text=body.content,
+                        image=photo[0],
+                        media_type=photo[1],
+                        grade=grade,
+                    )
+                except Exception:
+                    logger.exception("照片识题失败")
+                    photo_reading = None
             yield sse({"type": "conversation", "id": str(conversation_id)})
             facts = await teaching_facts(pool, LOCAL_USER_ID)
             archive = await active_facts(pool, LOCAL_USER_ID)
@@ -251,7 +350,8 @@ async def chat(body: ChatIn):
             except Exception:
                 logger.exception("错题检索失败")
             if body.image_id is not None:
-                mistake_note = f"{mistake_note}\n\n{PHOTO_NOTE}" if mistake_note else PHOTO_NOTE
+                photo_note = _photo_note(photo_reading, photo_only=body.content == "（一张照片）")
+                mistake_note = f"{mistake_note}\n\n{photo_note}" if mistake_note else photo_note
             messages = tutor_messages(
                 await load_messages(pool, conversation_id),
                 facts,
@@ -259,6 +359,8 @@ async def chat(body: ChatIn):
                 ask_grade=ask_grade,
                 mistake_note=mistake_note,
             )
+            if photo is not None and photo_reading is not None:
+                messages = _with_photo(messages, photo[1], photo[0])
             async for delta in stream_tutor(app.state.http, settings, messages):
                 parts.append(delta)
                 yield sse({"type": "delta", "text": delta})
@@ -297,6 +399,8 @@ async def chat(body: ChatIn):
                             user_message_id=user_message_id,
                             user_text=body.content,
                             assistant_text="".join(parts),
+                            saw_photo=body.image_id is not None,
+                            photo_reading=photo_reading,
                         )
                     )
 

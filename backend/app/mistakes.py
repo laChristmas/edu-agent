@@ -1,3 +1,4 @@
+import base64
 import json
 import logging
 import tomllib
@@ -12,6 +13,7 @@ import asyncpg
 import httpx
 
 from app.config import Settings
+from app.images import PHOTO_KINDS, VISION_PROMPT
 
 logger = logging.getLogger("eduagent.mistakes")
 
@@ -41,6 +43,18 @@ class ParsedMistake:
     error_type: str | None
     subject: str | None
     knowledge_points: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class PhotoReading:
+    """看过照片后的内容。auto 为真表示因过程错误且题目适合年级而记下。"""
+
+    kind: str
+    stem: str | None
+    steps: str | None
+    description: str | None
+    mistake: ParsedMistake | None
+    auto: bool = False
 
 
 async def parse_mistake(
@@ -118,6 +132,103 @@ def _clean(value) -> str | None:
         return None
     text = str(value).strip()
     return text or None
+
+
+async def read_photo(
+    client: httpx.AsyncClient,
+    settings: Settings,
+    pool: asyncpg.Pool,
+    *,
+    conversation_id: UUID,
+    user_message_id: UUID,
+    user_text: str,
+    image: bytes,
+    media_type: str,
+    grade: str | None = None,
+) -> PhotoReading:
+    """先解析照片里有什么。过程错了且题目适合当前年级时，才收成错题。"""
+    allowed = "、".join(ERROR_TYPE_LIST)
+    earlier = await _earlier_text(pool, conversation_id, user_message_id)
+    prior = earlier.strip() or "（无）"
+    user_prompt = (
+        f"允许的错因：{allowed}\n"
+        f"当前年级：{grade or '（无）'}\n\n"
+        f"先前对话：\n{prior}\n\n"
+        f"学生原话：{user_text.strip()}"
+    )
+    encoded = base64.b64encode(image).decode("ascii")
+    url = settings.llm_base_url.rstrip("/") + "/chat/completions"
+    response = await client.post(
+        url,
+        headers={"Authorization": f"Bearer {settings.llm_api_key}"},
+        json={
+            "model": settings.extractor_model,
+            "messages": [
+                {"role": "system", "content": VISION_PROMPT},
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:{media_type};base64,{encoded}"},
+                        },
+                        {"type": "text", "text": user_prompt},
+                    ],
+                },
+            ],
+            # 只要结构，不要先写一段思考把 JSON 冲掉。
+            "enable_thinking": False,
+        },
+    )
+    if response.status_code >= 400:
+        detail = response.text[:500]
+        raise RuntimeError(f"照片识题返回 {response.status_code}: {detail}")
+    message = response.json()["choices"][0]["message"]
+    content = message.get("content") if isinstance(message, dict) else None
+    if isinstance(content, list):
+        content = "".join(
+            part.get("text", "") if isinstance(part, dict) else str(part) for part in content
+        )
+    if not isinstance(content, str) or not content.strip():
+        raise RuntimeError("照片识题没有返回文字")
+    payload = json.loads(_json_text(content))
+    if not isinstance(payload, dict):
+        return PhotoReading("其他", None, None, None, None, False)
+    return _reading_from(payload, user_text=user_text, grade=grade)
+
+
+_AUTO_KINDS = frozenset({"题目和解题过程", "解题过程"})
+_RECORD_PHRASES = ("记下", "记进错题", "记入错题", "错题本")
+
+
+def _asked_to_record(user_text: str) -> bool:
+    text = user_text.strip()
+    if not text or text == "（一张照片）":
+        return False
+    return any(phrase in text for phrase in _RECORD_PHRASES)
+
+
+def _reading_from(payload: dict, *, user_text: str, grade: str | None) -> PhotoReading:
+    """代码再核对一遍。模型把做对的或不适合年级的题收成错题时，这里丢掉。"""
+    kind = _clean(payload.get("kind")) or "其他"
+    if kind not in PHOTO_KINDS:
+        kind = "其他"
+    stem = _clean(payload.get("stem"))
+    steps = _clean(payload.get("steps"))
+    description = _clean(payload.get("description"))
+    model_mistake = _normalize(payload.get("mistake"))
+    # 学生明确要记下时，沿用原话里的错题，不再用年级挡掉。
+    if _asked_to_record(user_text) and model_mistake is not None:
+        return PhotoReading(kind, stem, steps, description, model_mistake, False)
+    fits = payload.get("fits_grade") is True
+    wrong = payload.get("work_correct") is False
+    if kind in _AUTO_KINDS and grade and fits and wrong and (stem or (model_mistake and model_mistake.stem)):
+        mistake = model_mistake
+        if mistake is None and stem:
+            mistake = ParsedMistake(stem, steps, None, None, None, ())
+        if mistake is not None:
+            return PhotoReading(kind, stem or mistake.stem, steps, description, mistake, True)
+    return PhotoReading(kind, stem, steps, description, None, False)
 
 
 def _json_text(content: str) -> str:
@@ -201,25 +312,38 @@ async def record_turn(
     user_message_id: UUID,
     user_text: str,
     assistant_text: str,
+    saw_photo: bool = False,
+    photo_reading: PhotoReading | None = None,
 ) -> None:
-    """回复落库后，把口述、粘贴和补记收成同一条写入。失败只记日志。"""
+    """回复落库后，把口述、粘贴、补记和照片记错题收成同一条写入。失败只记日志。"""
     try:
-        earlier = await _earlier_text(pool, conversation_id, user_message_id)
-        parsed = await parse_mistake(
-            client,
-            settings,
-            user_text,
-            assistant_text,
-            earlier,
-        )
+        if saw_photo and photo_reading is not None:
+            # 开口前已经看过。这里只落库，不再把照片又判成一道题。
+            parsed = photo_reading.mistake
+        else:
+            # 没照片，或照片没读成。没读成时只看原话，不把照片本身当题目。
+            earlier = await _earlier_text(pool, conversation_id, user_message_id)
+            parsed = await parse_mistake(
+                client,
+                settings,
+                user_text,
+                assistant_text,
+                earlier,
+            )
         if parsed is None:
             return
+        raw_text = user_text
+        if photo_reading is not None and photo_reading.auto:
+            # 只发照片时原话是占位。错题里留下题目和过程，方便以后找回。
+            raw_text = parsed.stem
+            if photo_reading.steps:
+                raw_text = f"{raw_text}\n{photo_reading.steps}"
         mistake_id = await save_mistake(
             pool,
             user_id=user_id,
-            raw_text=user_text,
+            raw_text=raw_text,
             parsed=parsed,
-            source=mistake_source(user_text),
+            source=mistake_source(raw_text),
             source_message_id=user_message_id,
         )
     except Exception:

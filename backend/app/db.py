@@ -209,7 +209,7 @@ async def ensure_schema(pool: asyncpg.Pool) -> None:
             CHECK (kind IN ('chat', 'briefing'))
             """
         )
-        # 照片先挂到用户和会话。识题之前不写进错题。删消息时把挂在那一句上的照片行去掉。
+        # 照片挂在用户和会话上。只有记错题时才另写错题行，收到照片本身不入库成题。删消息时把挂在那一句上的照片行去掉。
         await connection.execute(
             """
             CREATE TABLE IF NOT EXISTS conversation_images (

@@ -15,7 +15,16 @@ with _CONFIG_PATH.open("rb") as config_file:
 
 MAX_BYTES = int(_IMAGES["max_bytes"])
 MEDIA_TYPES = frozenset(str(item) for item in _IMAGES["media_types"])
-PHOTO_NOTE = str(_IMAGES["photo_note"]).strip()
+PHOTO_UNREAD = str(_IMAGES["photo_unread"]).strip()
+PHOTO_MISTAKE_NOTE = str(_IMAGES["photo_mistake_note"]).strip()
+PHOTO_AUTO_NOTE = str(_IMAGES["photo_auto_note"]).strip()
+PHOTO_PROBLEM = str(_IMAGES["photo_problem"]).strip()
+PHOTO_GRADE = str(_IMAGES["photo_grade"]).strip()
+PHOTO_STEPS = str(_IMAGES["photo_steps"]).strip()
+PHOTO_OTHER = str(_IMAGES["photo_other"]).strip()
+PHOTO_WITH_TEXT = str(_IMAGES["photo_with_text"]).strip()
+VISION_PROMPT = str(_IMAGES["vision_prompt"]).strip()
+PHOTO_KINDS = frozenset({"题目", "题目和解题过程", "解题过程", "其他"})
 
 # 扩展名由识别出的类型决定，不用上传时的文件名，避免路径被带着跑。
 _EXTENSIONS = {
@@ -135,6 +144,13 @@ async def attach_image(
         )
     if result.endswith("0"):
         raise HTTPException(status_code=404, detail="照片不在这段会话里")
+
+
+async def read_image_bytes(pool: asyncpg.Pool, image_id: UUID) -> tuple[bytes, str]:
+    """读出这张已挂上的照片。识题用同一份字节，不按上传文件名去找。"""
+    path, media_type = await open_image(pool, image_id)
+    data = await asyncio.to_thread(path.read_bytes)
+    return data, media_type
 
 
 async def open_image(pool: asyncpg.Pool, image_id: UUID) -> tuple[Path, str]:
