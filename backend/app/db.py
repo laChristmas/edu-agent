@@ -209,6 +209,26 @@ async def ensure_schema(pool: asyncpg.Pool) -> None:
             CHECK (kind IN ('chat', 'briefing'))
             """
         )
+        # 照片先挂到用户和会话。识题之前不写进错题。删消息时把挂在那一句上的照片行去掉。
+        await connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS conversation_images (
+                id uuid PRIMARY KEY,
+                user_id uuid NOT NULL REFERENCES users (id),
+                conversation_id uuid NOT NULL REFERENCES conversations (id),
+                message_id uuid REFERENCES messages (id) ON DELETE CASCADE,
+                media_type text NOT NULL,
+                byte_size integer NOT NULL CHECK (byte_size > 0),
+                created_at timestamptz NOT NULL DEFAULT now()
+            )
+            """
+        )
+        await connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS conversation_images_conversation_idx
+            ON conversation_images (conversation_id, created_at)
+            """
+        )
         # 简报上的条目留住，学生说开始或点名时才知道讲哪一件。
         await connection.execute(
             """

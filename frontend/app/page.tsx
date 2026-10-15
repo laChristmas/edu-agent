@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, PointerEvent as ReactPointerEvent, useCallback, useEffect, useRef, useState } from "react";
+import { ChangeEvent, FormEvent, PointerEvent as ReactPointerEvent, useCallback, useEffect, useRef, useState } from "react";
 
 import MessageBody from "./message-body";
 import ProfilePanel from "./profile-panel";
@@ -16,6 +16,7 @@ type Role = "user" | "assistant";
 type ChatMessage = {
   role: Role;
   content: string;
+  imageId?: string;
 };
 
 type ChatEvent = {
@@ -34,8 +35,11 @@ export default function ChatPage() {
   const [inputHeight, setInputHeight] = useState(96);
   const [restoring, setRestoring] = useState(true);
   const [profileOpen, setProfileOpen] = useState(false);
+  const [photo, setPhoto] = useState<File | null>(null);
+  const [photoUrl, setPhotoUrl] = useState<string | null>(null);
   const resizeDrag = useRef<{ y: number; height: number } | null>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
 
   const openDialog = useCallback(async () => {
     setRestoring(true);
@@ -80,7 +84,28 @@ export default function ChatPage() {
       return;
     }
     // 放下这一段再打开。已落库的原文仍留在库里，只是不显示。
+    clearPhoto();
     void openDialog();
+  }
+
+  function clearPhoto() {
+    if (photoUrl) {
+      URL.revokeObjectURL(photoUrl);
+    }
+    setPhoto(null);
+    setPhotoUrl(null);
+    if (fileRef.current) {
+      fileRef.current.value = "";
+    }
+  }
+
+  function choosePhoto(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0] ?? null;
+    if (photoUrl) {
+      URL.revokeObjectURL(photoUrl);
+    }
+    setPhoto(file);
+    setPhotoUrl(file ? URL.createObjectURL(file) : null);
   }
 
   useEffect(() => {
@@ -123,26 +148,48 @@ export default function ChatPage() {
   async function send(event: FormEvent) {
     event.preventDefault();
     const content = draft.trim();
-    if (!content || sending || restoring) {
+    const chosen = photo;
+    if ((!content && !chosen) || sending || restoring) {
       return;
     }
 
     setDraft("");
     setError("");
     setSending(true);
-    setMessages((current) => [
-      ...current,
-      { role: "user", content },
-      { role: "assistant", content: "" },
-    ]);
-
+    let imageId: string | null = null;
+    let nextConversation = conversationId;
     try {
+      if (chosen) {
+        const form = new FormData();
+        form.append("file", chosen);
+        if (conversationId) {
+          form.append("conversation_id", conversationId);
+        }
+        const uploaded = await fetch(`${API_BASE}/images`, { method: "POST", body: form });
+        if (!uploaded.ok) {
+          setDraft(content);
+          setError(uploaded.status === 400 ? "照片格式或大小不符合" : "照片没有收下");
+          return;
+        }
+        const saved = (await uploaded.json()) as { id: string; conversation_id: string };
+        imageId = saved.id;
+        nextConversation = saved.conversation_id;
+        rememberConversation(saved.conversation_id);
+        clearPhoto();
+      }
+      const shown = content || "（一张照片）";
+      setMessages((current) => [
+        ...current,
+        { role: "user", content: shown, imageId: imageId ?? undefined },
+        { role: "assistant", content: "" },
+      ]);
       const response = await fetch(`${API_BASE}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           content,
-          conversation_id: conversationId,
+          conversation_id: nextConversation,
+          image_id: imageId,
         }),
       });
 
@@ -227,6 +274,9 @@ export default function ChatPage() {
           ) : null}
           {messages.map((message, index) => (
             <div className={`bubble ${message.role}`} key={`${message.role}-${index}`}>
+              {message.imageId ? (
+                <img className="photo" src={`${API_BASE}/images/${message.imageId}`} alt="发送的照片" />
+              ) : null}
               {message.role === "assistant" && message.content ? (
                 <MessageBody text={message.content} />
               ) : message.content ? (
@@ -239,7 +289,31 @@ export default function ChatPage() {
         </div>
         {error ? <p className="error">{error}</p> : null}
         <form className="composer" onSubmit={send}>
+          {photoUrl ? (
+            <div className="photo-preview">
+              <img src={photoUrl} alt="待发送的照片" />
+              <button type="button" onClick={clearPhoto}>
+                移除
+              </button>
+            </div>
+          ) : null}
           <div className="composer-field">
+            <input
+              ref={fileRef}
+              type="file"
+              accept="image/jpeg,image/png,image/webp"
+              hidden
+              onChange={choosePhoto}
+            />
+            <button
+              type="button"
+              className="attach"
+              aria-label="选择照片"
+              disabled={sending || restoring}
+              onClick={() => fileRef.current?.click()}
+            >
+              照片
+            </button>
             <textarea
               aria-label="消息"
               style={{ height: inputHeight }}
@@ -271,7 +345,7 @@ export default function ChatPage() {
                 <circle cx="7.75" cy="11.75" r="1.15" />
               </svg>
             </button>
-            <button type="submit" className="send" disabled={sending || restoring || !draft.trim()}>
+            <button type="submit" className="send" disabled={sending || restoring || (!draft.trim() && !photo)}>
               发送
             </button>
           </div>

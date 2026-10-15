@@ -4,10 +4,10 @@ from contextlib import asynccontextmanager
 from uuid import UUID
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, field_validator
+from fastapi.responses import FileResponse, StreamingResponse
+from pydantic import BaseModel, field_validator, model_validator
 
 from app.chat import (
     TurnInProgress,
@@ -25,6 +25,7 @@ from app.config import get_settings
 from app.daily import open_briefing
 from app.db import LOCAL_USER_ID, create_pool, ensure_schema, pgvector_version
 from app.extract import extract_turn
+from app.images import PHOTO_NOTE, attach_image, open_image, require_pending_image, save_image
 from app.memory import active_facts, confirm_facts, list_profile, teaching_facts
 from app.mistakes import list_mistakes, record_turn
 from app.search import prepare_mistake_lookup
@@ -87,16 +88,23 @@ class BriefingIn(BaseModel):
 
 
 class ChatIn(BaseModel):
-    content: str
+    content: str = ""
     conversation_id: UUID | None = None
+    image_id: UUID | None = None
 
     @field_validator("content")
     @classmethod
-    def content_not_blank(cls, value: str) -> str:
-        text = value.strip()
-        if not text:
+    def strip_content(cls, value: str) -> str:
+        return value.strip()
+
+    @model_validator(mode="after")
+    def content_or_image(self) -> "ChatIn":
+        # 只发照片时没有文字。用一句固定说法留下这轮，识题以后再换成题干。
+        if not self.content and self.image_id is None:
             raise ValueError("内容不能为空")
-        return text
+        if not self.content:
+            self.content = "（一张照片）"
+        return self
 
 
 @app.get("/health")
@@ -169,6 +177,32 @@ async def briefing(body: BriefingIn):
     }
 
 
+@app.post("/images")
+async def upload_image(
+    file: UploadFile = File(),
+    conversation_id: UUID | None = Form(None),
+):
+    """收下照片并挂到用户和会话。这一步不识题。"""
+    data = await file.read()
+    image_id, saved_conversation, media_type = await save_image(
+        app.state.pool,
+        conversation_id=conversation_id,
+        data=data,
+    )
+    return {
+        "id": str(image_id),
+        "conversation_id": str(saved_conversation),
+        "media_type": media_type,
+    }
+
+
+@app.get("/images/{image_id}")
+async def read_image(image_id: UUID):
+    """按编号取回这个用户的照片。"""
+    path, media_type = await open_image(app.state.pool, image_id)
+    return FileResponse(path, media_type=media_type)
+
+
 @app.post("/chat")
 async def chat(body: ChatIn):
     """把用户消息落库后逐字流式返回。同一会话上一轮未结束时不开始下一轮。"""
@@ -182,6 +216,8 @@ async def chat(body: ChatIn):
     else:
         conversation_id = body.conversation_id
         await require_conversation(pool, conversation_id)
+    if body.image_id is not None:
+        await require_pending_image(pool, body.image_id, conversation_id)
 
     try:
         await begin_turn(conversation_id)
@@ -194,6 +230,8 @@ async def chat(body: ChatIn):
         user_message_id = None
         try:
             user_message_id = await save_message(pool, conversation_id, "user", body.content)
+            if body.image_id is not None:
+                await attach_image(pool, body.image_id, conversation_id, user_message_id)
             yield sse({"type": "conversation", "id": str(conversation_id)})
             facts = await teaching_facts(pool, LOCAL_USER_ID)
             archive = await active_facts(pool, LOCAL_USER_ID)
@@ -212,6 +250,8 @@ async def chat(body: ChatIn):
                 )
             except Exception:
                 logger.exception("错题检索失败")
+            if body.image_id is not None:
+                mistake_note = f"{mistake_note}\n\n{PHOTO_NOTE}" if mistake_note else PHOTO_NOTE
             messages = tutor_messages(
                 await load_messages(pool, conversation_id),
                 facts,

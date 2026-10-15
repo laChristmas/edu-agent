@@ -229,13 +229,44 @@ button:focus-visible {
   min-width: 0;
 }
 
+.photo {
+  display: block;
+  max-width: min(100%, 280px);
+  margin-bottom: 8px;
+  border-radius: 10px;
+}
+
+.photo-preview {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.photo-preview img {
+  display: block;
+  width: 72px;
+  height: 72px;
+  object-fit: cover;
+  border-radius: 10px;
+  border: 1px solid #e4e1da;
+}
+
+.photo-preview button {
+  padding: 6px 10px;
+  border: 1px solid #d5d2cb;
+  border-radius: 999px;
+  background: #fff;
+  cursor: pointer;
+}
+
 .composer textarea {
   display: block;
   width: 100%;
   min-height: 96px;
   max-height: 420px;
   resize: none;
-  padding: 12px 28px 48px 14px;
+  padding: 12px 28px 48px 64px;
   border: 1px solid #e0ddd6;
   border-radius: 14px;
   background: #fafaf8;
@@ -278,6 +309,27 @@ button:focus-visible {
 .resize-handle:focus-visible {
   background: #efece6;
   color: #1c1c1c;
+}
+
+.attach {
+  position: absolute;
+  left: 8px;
+  bottom: 8px;
+  padding: 7px 12px;
+  border: 1px solid #d5d2cb;
+  border-radius: 999px;
+  background: #fff;
+  color: #1c1c1c;
+  cursor: pointer;
+}
+
+.attach:hover:not(:disabled) {
+  background: #f7f6f3;
+}
+
+.attach:disabled {
+  cursor: default;
+  opacity: 0.4;
 }
 
 .send {
