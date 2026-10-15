@@ -17,7 +17,10 @@ _WEB = _RULES["web"]
 DECIDE_PROMPT = str(_WEB["decide_prompt"]).strip()
 DIGEST_PROMPT = str(_WEB["digest_prompt"]).strip()
 NOTE_PROMPT = str(_WEB["note_prompt"]).strip()
+UNCERTAIN_PROMPT = str(_WEB["uncertain_prompt"]).strip()
 KINDS = {str(item) for item in _WEB["kinds"]}
+CITE_KINDS = {str(item) for item in _WEB["cite_kinds"]}
+SEARCH_STRATEGY = str(_WEB["search_strategy"]).strip()
 MAX_RESULTS = int(_WEB["max_results"])
 MAX_DIGEST_CHARS = int(_WEB["max_digest_chars"])
 # 只发照片时这句话是占位，不代表学生在问一件会过时的事。
@@ -30,27 +33,48 @@ async def prepare_web_lookup(
     *,
     user_text: str,
 ) -> str | None:
-    """会过时的事实才去检索，并把材料交给家教。普通讲题返回空。"""
+    """会过时的事实才去检索。考纲和分数线没有可引用的来源时，让家教说明不确定。"""
     text = user_text.strip()
     if not text or text == _PHOTO_ONLY:
         return None
-    query = await _search_query(client, settings, text)
-    if query is None:
+    decided = await _search_query(client, settings, text)
+    if decided is None:
         return None
-    digest, sources = await _search_web(client, settings, query)
+    kind, query = decided
+    try:
+        digest, sources = await _search_web(client, settings, query)
+    except Exception:
+        logger.exception("网页检索失败")
+        return _uncertain_note(query)
+    # 考纲和分数线必须能指出来源。只有摘录、没有出处，仍算没查到。
+    if kind in CITE_KINDS and (not digest or not sources):
+        logger.warning("网页检索没有可引用的来源")
+        return _uncertain_note(query)
     if not digest and not sources:
-        return None
+        return _uncertain_note(query)
+    return _result_note(query, digest, sources)
+
+
+def _uncertain_note(query: str) -> str:
+    return "\n".join([UNCERTAIN_PROMPT, "", f"问：{query}"])
+
+
+def _result_note(query: str, digest: str, sources: list[tuple[str, str]]) -> str:
     lines = [NOTE_PROMPT, "", f"问：{query}"]
     if digest:
         lines.extend(["", "摘录：", digest])
     if sources:
         lines.append("")
-        lines.append("条目：")
-        lines.extend(f"{index}. {title} {url}" for index, title, url in enumerate(sources, start=1))
+        lines.append("来源：")
+        lines.extend(f"{index}. {title} {url}" for index, (title, url) in enumerate(sources, start=1))
     return "\n".join(lines)
 
 
-async def _search_query(client: httpx.AsyncClient, settings: Settings, user_text: str) -> str | None:
+async def _search_query(
+    client: httpx.AsyncClient,
+    settings: Settings,
+    user_text: str,
+) -> tuple[str, str] | None:
     """先判断要不要查。判断失败就抛出，由这一轮照常讲。"""
     url = settings.llm_base_url.rstrip("/") + "/chat/completions"
     response = await client.post(
@@ -79,7 +103,18 @@ async def _search_query(client: httpx.AsyncClient, settings: Settings, user_text
     if kind not in KINDS:
         return None
     query = str(payload.get("query") or "").strip() or user_text
-    return query[:200]
+    return kind, query[:200]
+
+
+def _multimodal_url(base: str) -> str:
+    """兼容接口不返回来源。这个模型走文本生成会报地址错误，所以改走多模态接口。"""
+    root = base.rstrip("/")
+    marker = "/compatible-mode/v1"
+    if root.endswith(marker):
+        root = root[: -len(marker)]
+    elif root.endswith("/v1"):
+        root = root[:-3]
+    return root + "/api/v1/services/aigc/multimodal-generation/generation"
 
 
 async def _search_web(
@@ -87,52 +122,82 @@ async def _search_web(
     settings: Settings,
     query: str,
 ) -> tuple[str, list[tuple[str, str]]]:
-    """这个模型走文本生成接口会报地址错误。联网搜索沿用现在的兼容接口，并强制检索。"""
+    """多模态模型联网必须流式，否则接口不检索。来源在最后一段的 search_info 里。"""
     logger.warning("网页检索 %s", query)
-    response = await client.post(
-        settings.llm_base_url.rstrip("/") + "/chat/completions",
-        headers={"Authorization": f"Bearer {settings.llm_api_key}"},
+    async with client.stream(
+        "POST",
+        _multimodal_url(settings.llm_base_url),
+        headers={
+            "Authorization": f"Bearer {settings.llm_api_key}",
+            "Content-Type": "application/json",
+            "X-DashScope-SSE": "enable",
+        },
         json={
             "model": settings.extractor_model,
-            "enable_thinking": False,
-            "enable_search": True,
-            "search_options": {
-                "forced_search": True,
-                "enable_source": True,
+            "input": {
+                "messages": [
+                    {"role": "system", "content": [{"text": DIGEST_PROMPT}]},
+                    {"role": "user", "content": [{"text": query}]},
+                ]
             },
-            "messages": [
-                {"role": "system", "content": DIGEST_PROMPT},
-                {"role": "user", "content": query},
-            ],
+            "parameters": {
+                # 思考过程会把摘录挤掉，来源也不在思考里。
+                "enable_thinking": False,
+                "enable_search": True,
+                "search_options": {
+                    "forced_search": True,
+                    "enable_source": True,
+                    "search_strategy": SEARCH_STRATEGY,
+                },
+                "result_format": "message",
+                "incremental_output": True,
+            },
         },
-    )
-    if response.status_code >= 400:
-        detail = response.text[:500]
-        raise RuntimeError(f"网页检索返回 {response.status_code}: {detail}")
-    payload = response.json()
-    if not isinstance(payload, dict):
-        raise RuntimeError("网页检索没有返回结果")
-    if payload.get("code"):
-        message = str(payload.get("message") or payload["code"])
-        raise RuntimeError(f"网页检索失败: {message[:500]}")
-    digest = _digest(payload)[:MAX_DIGEST_CHARS].strip()
-    sources = _sources(payload)
+    ) as response:
+        if response.status_code >= 400:
+            detail = (await response.aread()).decode("utf-8", errors="replace")[:500]
+            raise RuntimeError(f"网页检索返回 {response.status_code}: {detail}")
+        digest, sources = await _read_search_stream(response)
+    digest = digest[:MAX_DIGEST_CHARS].strip()
     logger.warning("网页检索完成 摘录%s 条目%s", "有" if digest else "无", len(sources))
     return digest, sources
 
 
-def _digest(output: dict) -> str:
+async def _read_search_stream(response: httpx.Response) -> tuple[str, list[tuple[str, str]]]:
+    """增量流要把文字拼起来。来源列表通常只在最后一段给全。"""
+    parts: list[str] = []
+    sources: list[tuple[str, str]] = []
+    async for line in response.aiter_lines():
+        if not line.startswith("data:"):
+            continue
+        data = line.removeprefix("data:").strip()
+        if not data or data == "[DONE]":
+            continue
+        payload = json.loads(data)
+        if not isinstance(payload, dict):
+            raise RuntimeError("网页检索没有返回结果")
+        if payload.get("code"):
+            message = str(payload.get("message") or payload["code"])
+            raise RuntimeError(f"网页检索失败: {message[:500]}")
+        output = payload.get("output") or {}
+        parts.extend(_content_parts(output))
+        found = _sources(output)
+        if found:
+            sources = found
+    return "".join(parts), sources
+
+
+def _content_parts(output: dict) -> list[str]:
     choices = output.get("choices") or []
     if not choices:
-        return ""
+        return []
     message = choices[0].get("message") or {}
     content = message.get("content")
     if isinstance(content, str):
-        return content.strip()
+        return [content]
     if isinstance(content, list):
-        parts = [str(item.get("text") or "") for item in content if isinstance(item, dict)]
-        return "\n".join(part for part in parts if part).strip()
-    return ""
+        return [str(item.get("text") or "") for item in content if isinstance(item, dict) and item.get("text")]
+    return []
 
 
 def _sources(output: dict) -> list[tuple[str, str]]:

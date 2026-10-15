@@ -352,7 +352,7 @@ async def chat(body: ChatIn):
                 logger.exception("错题检索失败")
             web_note = None
             try:
-                # 只有会过时的事实才检索。失败就照常讲，不挡住这一轮。
+                # 会过时的事实才检索。检索失败时家教说明不确定。判断本身失败才照常讲，不挡住这一轮。
                 web_note = await prepare_web_lookup(
                     app.state.http,
                     settings,
