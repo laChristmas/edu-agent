@@ -83,6 +83,7 @@ button:focus-visible {
 }
 
 .dialog {
+  position: relative;
   flex: 1;
   min-height: 0;
   display: flex;
@@ -92,6 +93,24 @@ button:focus-visible {
   border: 1px solid #e4e1da;
   border-radius: 18px;
   box-shadow: 0 1px 2px rgba(28, 28, 28, 0.04), 0 12px 32px rgba(28, 28, 28, 0.05);
+}
+
+.dialog.dragging {
+  border-color: #1c1c1c;
+}
+
+.drop-hint {
+  position: absolute;
+  inset: 10px;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  border: 1.5px dashed #1c1c1c;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.92);
+  color: #1c1c1c;
+  font-size: 15px;
+  pointer-events: none;
 }
 
 .messages {

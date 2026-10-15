@@ -1,12 +1,25 @@
 "use client";
 
-import { ChangeEvent, FormEvent, PointerEvent as ReactPointerEvent, useCallback, useEffect, useRef, useState } from "react";
+import {
+  ChangeEvent,
+  ClipboardEvent as ReactClipboardEvent,
+  DragEvent as ReactDragEvent,
+  FormEvent,
+  PointerEvent as ReactPointerEvent,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 
 import MessageBody from "./message-body";
 import ProfilePanel from "./profile-panel";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? "http://127.0.0.1:8000";
 const CONVERSATION_KEY = "eduagent.conversation_id";
+// 与 config.toml 里的 max_bytes 一致。先在页面拦住，避免选中后再被退回。
+const PHOTO_BYTES = 16_000_000;
+const PHOTO_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 
 // 开发模式会把打开跑两遍。共用同一次请求，避免连写两条简报。
 let openingDialog: Promise<{ id: string | null; messages: ChatMessage[] }> | null = null;
@@ -40,6 +53,8 @@ export default function ChatPage() {
   const resizeDrag = useRef<{ y: number; height: number } | null>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const dragDepth = useRef(0);
+  const [dragging, setDragging] = useState(false);
 
   const openDialog = useCallback(async () => {
     setRestoring(true);
@@ -99,13 +114,106 @@ export default function ChatPage() {
     }
   }
 
-  function choosePhoto(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0] ?? null;
+  function takePhoto(file: File | null) {
+    if (!file || sending || restoring) {
+      return;
+    }
+    // 类型空着时留给服务端认文件头。明确不是这三种的，当场退回。
+    if ((file.type && !PHOTO_TYPES.has(file.type)) || file.size === 0 || file.size > PHOTO_BYTES) {
+      setError("照片格式或大小不符合");
+      return;
+    }
+    setError("");
     if (photoUrl) {
       URL.revokeObjectURL(photoUrl);
     }
     setPhoto(file);
-    setPhotoUrl(file ? URL.createObjectURL(file) : null);
+    setPhotoUrl(URL.createObjectURL(file));
+    if (fileRef.current) {
+      fileRef.current.value = "";
+    }
+  }
+
+  function looksLikePhoto(file: File): boolean {
+    if (file.type.startsWith("image/")) {
+      return true;
+    }
+    return /\.(jpe?g|png|webp)$/i.test(file.name);
+  }
+
+  function imageFile(files: FileList | null, items: DataTransferItemList | null): File | null {
+    const listed = files ? [...files].find(looksLikePhoto) : null;
+    if (listed) {
+      return listed;
+    }
+    if (!items) {
+      return null;
+    }
+    for (const item of items) {
+      if (item.kind === "file" && item.type.startsWith("image/")) {
+        const file = item.getAsFile();
+        if (file && looksLikePhoto(file)) {
+          return file;
+        }
+      }
+    }
+    return null;
+  }
+
+  function choosePhoto(event: ChangeEvent<HTMLInputElement>) {
+    takePhoto(event.target.files?.[0] ?? null);
+  }
+
+  function enterDrag(event: ReactDragEvent<HTMLElement>) {
+    if (!event.dataTransfer.types.includes("Files")) {
+      return;
+    }
+    event.preventDefault();
+    dragDepth.current += 1;
+    setDragging(true);
+  }
+
+  function moveDrag(event: ReactDragEvent<HTMLElement>) {
+    if (!event.dataTransfer.types.includes("Files")) {
+      return;
+    }
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+  }
+
+  function leaveDrag(event: ReactDragEvent<HTMLElement>) {
+    if (!event.dataTransfer.types.includes("Files")) {
+      return;
+    }
+    event.preventDefault();
+    dragDepth.current = Math.max(0, dragDepth.current - 1);
+    if (dragDepth.current === 0) {
+      setDragging(false);
+    }
+  }
+
+  function dropPhoto(event: ReactDragEvent<HTMLElement>) {
+    if (!event.dataTransfer.types.includes("Files")) {
+      return;
+    }
+    event.preventDefault();
+    dragDepth.current = 0;
+    setDragging(false);
+    const file = imageFile(event.dataTransfer.files, event.dataTransfer.items);
+    if (!file) {
+      setError("照片格式或大小不符合");
+      return;
+    }
+    takePhoto(file);
+  }
+
+  function pastePhoto(event: ReactClipboardEvent<HTMLElement>) {
+    const file = imageFile(event.clipboardData.files, event.clipboardData.items);
+    if (!file) {
+      return;
+    }
+    event.preventDefault();
+    takePhoto(file);
   }
 
   useEffect(() => {
@@ -267,7 +375,16 @@ export default function ChatPage() {
           </button>
         </div>
       </div>
-      <section className="dialog" aria-label="对话">
+      <section
+        className={dragging ? "dialog dragging" : "dialog"}
+        aria-label="对话"
+        onDragEnter={enterDrag}
+        onDragOver={moveDrag}
+        onDragLeave={leaveDrag}
+        onDrop={dropPhoto}
+        onPaste={pastePhoto}
+      >
+        {dragging ? <div className="drop-hint">松开即可添加照片</div> : null}
         <div className="messages" ref={messagesRef}>
           {messages.length === 0 && !restoring ? (
             <p className="empty">写在下面，讲解会出现在这里。</p>
