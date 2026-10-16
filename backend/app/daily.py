@@ -14,6 +14,7 @@ from app.chat import create_conversation, load_messages, require_conversation
 from app.config import Settings
 from app.mastery import local_today, review_moment
 from app.memory import active_facts, teaching_facts
+from app.tutor import ensure_greeting_asks, greeting_identity_note
 
 logger = logging.getLogger("eduagent.daily")
 
@@ -110,7 +111,7 @@ async def open_briefing(
             messages = [] if conversation_id is None else await load_messages(pool, conversation_id)
             return OpenedDialog(conversation_id, messages)
         # 招呼没写成也留一句，不再把打开变成空白。
-        text = GREETING_FALLBACK
+        text = ensure_greeting_asks(GREETING_FALLBACK, await active_facts(pool, user_id))
     if conversation_id is None:
         conversation_id = await create_conversation(pool)
     replaced = await _store_briefing(pool, conversation_id, user_id, text, selection)
@@ -306,7 +307,8 @@ async def _compose_greeting(
     user_id: UUID,
 ) -> str:
     """没有复习条目时只打招呼。档案全部交给模型，由它决定写不写进招呼。"""
-    known = _archive_text(await active_facts(pool, user_id))
+    facts = await active_facts(pool, user_id)
+    known = _archive_text(facts)
     url = settings.llm_base_url.rstrip("/") + "/chat/completions"
     response = await client.post(
         url,
@@ -314,9 +316,11 @@ async def _compose_greeting(
         json={
             "model": settings.extractor_model,
             "messages": [
-                {"role": "system", "content": GREETING_PROMPT},
+                {"role": "system", "content": f"{GREETING_PROMPT}\n\n{greeting_identity_note(facts)}"},
                 {"role": "user", "content": known},
             ],
+            # 关掉思考过程，避免该不该问称呼被写进招呼。
+            "enable_thinking": False,
         },
     )
     if response.status_code >= 400:
@@ -326,7 +330,7 @@ async def _compose_greeting(
     text = str(content or "").strip()
     if not text:
         raise RuntimeError("招呼是空的")
-    return text
+    return ensure_greeting_asks(text, facts)
 
 
 def _archive_text(facts: list[dict[str, str]]) -> str:

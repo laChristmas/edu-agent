@@ -23,7 +23,7 @@ from app.chat import (
     sse,
     stream_tutor,
 )
-from app.tutor import tutor_messages
+from app.tutor import identity_note, tutor_messages
 from app.config import get_settings
 from app.daily import open_briefing
 from app.db import LOCAL_USER_ID, create_pool, ensure_schema, pgvector_version
@@ -451,7 +451,7 @@ async def chat(body: ChatIn):
                 yield sse({"type": "later"})
             facts = await teaching_facts(pool, LOCAL_USER_ID)
             archive = await active_facts(pool, LOCAL_USER_ID)
-            ask_grade = not any(fact["dimension"] == "身份" and fact["key"] == "年级" for fact in archive)
+            history = await load_messages(pool, conversation_id)
             mistake_note = None
             try:
                 # 像在找错题时才检索。失败就照常讲，不挡住这一轮。
@@ -480,10 +480,10 @@ async def chat(body: ChatIn):
                 photo_note = _photo_note(photo_reading, photo_only=body.content == "（一张照片）")
                 mistake_note = f"{mistake_note}\n\n{photo_note}" if mistake_note else photo_note
             messages = tutor_messages(
-                await load_messages(pool, conversation_id),
+                history,
                 facts,
                 archive,
-                ask_grade=ask_grade,
+                identity_note=identity_note(archive, history),
                 mistake_note=mistake_note,
                 web_note=web_note,
                 job_note=job_note,

@@ -257,13 +257,13 @@ def _fallback(payload: dict) -> str:
     exam = str(payload.get("exam") or "").strip()
     if mistakes and exam:
         item = mistakes[0]
-        return f"这周在{exam}之前，先把{item['due']}要复习的{item['label']}过一遍。"
+        return f"这周先顾着{exam}，{item['due']}要复习的{item['label']}也一起过一遍。"
     if mistakes:
         item = mistakes[0]
-        return f"这周先把{item['due']}要复习的{item['label']}过一遍。"
+        return f"这周我们先把{item['due']}要复习的{item['label']}过一遍。"
     if exam:
-        return f"这周先准备{exam}，没有别的到期错题。"
-    return "这周没有要复习的题，想问什么直接说。"
+        return f"这周先准备{exam}就好，没有别的到期的题。"
+    return "这周没有要复习的题。你想问什么，跟我说就好。"
 
 
 async def _save(

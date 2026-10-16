@@ -117,6 +117,8 @@ async def stream_tutor(
             "model": settings.tutor_model,
             "messages": messages,
             "stream": True,
+            # 关掉思考过程。否则身份该不该问会被写进给学生看的回复里。
+            "enable_thinking": False,
         },
     ) as response:
         if response.status_code >= 400:
