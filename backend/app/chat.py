@@ -78,6 +78,16 @@ async def save_message(
     return message_id
 
 
+async def append_message(pool: asyncpg.Pool, message_id: UUID, extra: str) -> None:
+    """家教决定改口时，把后补的那一句接到已经落库的回复上。"""
+    async with pool.acquire() as connection:
+        await connection.execute(
+            "UPDATE messages SET content = content || $2 WHERE id = $1",
+            message_id,
+            extra,
+        )
+
+
 async def load_messages(pool: asyncpg.Pool, conversation_id: UUID) -> list[dict[str, str]]:
     """按时间读出本会话已落库的消息。截断最近 12 轮在送给模型时做。"""
     async with pool.acquire() as connection:

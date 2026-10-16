@@ -268,6 +268,10 @@ async def ensure_schema(pool: asyncpg.Pool) -> None:
             )
             """
         )
+        # 家教决定改口时才写下追加的那一句。不改口就留空。
+        await connection.execute(
+            "ALTER TABLE solution_checks ADD COLUMN IF NOT EXISTS revision text"
+        )
 
 
 async def create_pool(settings: Settings) -> asyncpg.Pool:

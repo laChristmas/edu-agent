@@ -10,9 +10,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, field_validator, model_validator
 
-from app.check import run_check
+from app.check import consider_revision, mark_revision, open_check, preview_reason, run_check
 from app.chat import (
     TurnInProgress,
+    append_message,
     begin_turn,
     create_conversation,
     end_turn,
@@ -300,32 +301,57 @@ async def chat(body: ChatIn):
     async def events():
         parts: list[str] = []
         assistant_saved = False
+        handed = False
         user_message_id = None
         assistant_message_id = None
+        decide_task: asyncio.Task[str | None] | None = None
+        # 交接一旦排上，就不再依赖这条流。页面中途断开时，意见仍然要留下。
+        handoff_task: asyncio.Task[str | None] | None = None
         photo = None
         photo_reading: PhotoReading | None = None
+
+        async def _handoff() -> str | None:
+            """讲解落库后把意见交回家教。同意改口就先写入回复，连接还在时再推给页面。"""
+            if decide_task is None or assistant_message_id is None or user_message_id is None:
+                return None
+            reason = await decide_task
+            if reason is None:
+                logger.warning("解答复核跳过")
+                return None
+            opinion = await open_check(
+                pool,
+                app.state.http,
+                settings,
+                reason=reason,
+                user_id=LOCAL_USER_ID,
+                conversation_id=conversation_id,
+                user_message_id=user_message_id,
+                assistant_message_id=assistant_message_id,
+                user_text=body.content,
+                assistant_text="".join(parts),
+            )
+            if opinion is None:
+                return None
+            spoken = await consider_revision(app.state.http, settings, opinion)
+            if not spoken:
+                return None
+            extra = f"\n\n{spoken}"
+            await append_message(pool, assistant_message_id, extra)
+            await mark_revision(pool, opinion.check_id, spoken)
+            return extra
 
         async def _finish_turn() -> None:
             nonlocal assistant_message_id, assistant_saved
             if parts and not assistant_saved:
                 assistant_message_id = await save_message(pool, conversation_id, "assistant", "".join(parts))
                 assistant_saved = True
-            await end_turn(conversation_id)
-            # 画像、错题和复核都在回复落库之后另起任务，不占这条流式连接。
-            if user_message_id is not None and parts:
-                _spawn(
-                    extract_turn(
-                        pool,
-                        app.state.http,
-                        settings,
-                        user_id=LOCAL_USER_ID,
-                        user_message_id=user_message_id,
-                        user_text=body.content,
-                        assistant_text="".join(parts),
-                    )
-                )
-            if user_message_id is not None and assistant_message_id is not None:
-                # 这一轮已经说完。复核在后台看题目和关键步骤，不把意见插进刚发出的讲解。
+            if (
+                handoff_task is None
+                and not handed
+                and user_message_id is not None
+                and assistant_message_id is not None
+            ):
+                # 讲解已经落库，但交接还没排上。先补做复核，避免断线把意见丢掉。
                 _spawn(
                     run_check(
                         pool,
@@ -335,6 +361,20 @@ async def chat(body: ChatIn):
                         conversation_id=conversation_id,
                         user_message_id=user_message_id,
                         assistant_message_id=assistant_message_id,
+                        user_text=body.content,
+                        assistant_text="".join(parts),
+                    )
+                )
+            await end_turn(conversation_id)
+            # 画像和错题在回复落库之后另起任务，不占这条流式连接。
+            if user_message_id is not None and parts:
+                _spawn(
+                    extract_turn(
+                        pool,
+                        app.state.http,
+                        settings,
+                        user_id=LOCAL_USER_ID,
+                        user_message_id=user_message_id,
                         user_text=body.content,
                         assistant_text="".join(parts),
                     )
@@ -357,6 +397,8 @@ async def chat(body: ChatIn):
 
         try:
             user_message_id = await save_message(pool, conversation_id, "user", body.content)
+            # 要不要复核只看学生这句话，可以和后面的讲解一起进行。
+            decide_task = asyncio.create_task(preview_reason(app.state.http, settings, body.content))
             if body.image_id is not None:
                 await attach_image(pool, body.image_id, conversation_id, user_message_id)
                 # 先解析照片内容。过程错了且题目适合当前年级时才记入错题。
@@ -432,8 +474,24 @@ async def chat(body: ChatIn):
             if parts:
                 assistant_message_id = await save_message(pool, conversation_id, "assistant", "".join(parts))
                 assistant_saved = True
+                if user_message_id is not None and decide_task is not None:
+                    # 先把交接排出这条流。学生那边断开时，取消的是等待，不是复核本身。
+                    handoff_task = asyncio.create_task(_handoff())
+                    app.state.tasks.add(handoff_task)
+                    handoff_task.add_done_callback(app.state.tasks.discard)
+                    try:
+                        revision = await asyncio.shield(handoff_task)
+                        handed = True
+                        if revision:
+                            parts.append(revision)
+                            yield sse({"type": "delta", "text": revision})
+                    except Exception:
+                        logger.exception("复核交回失败")
+                        handed = True
             yield sse({"type": "done"})
         finally:
+            if handoff_task is None and decide_task is not None and not decide_task.done():
+                decide_task.cancel()
             # 页面可能在字收齐后就断开。收尾独立出去，取消这一轮时复核仍然排得上。
             tail = asyncio.create_task(_finish_turn())
             try:
