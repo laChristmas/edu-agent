@@ -39,11 +39,17 @@ _ASKED_MARKS = {
     "年级": ("几年级", "哪个年级"),
     "姓名": ("怎么称呼", "称呼你", "叫你什么", "你的名字"),
     "年龄": ("今年多大", "多大了", "几岁"),
+    "性别": ("男生还是女生", "男孩还是女孩"),
+    "身高": ("大概多高", "身高多少", "你的身高"),
+    "体重": ("体重大概", "体重多少", "你的体重", "多少公斤", "多少斤"),
 }
 _ASK_HOW = {
     "年级": "问现在读几年级。",
     "姓名": "问可以怎么称呼。不要把年级当成名字，也不要用「本地用户」当名字。",
     "年龄": "问今年多大。",
+    "性别": "轻轻问男生还是女生。不要写成填写性别。",
+    "身高": "问大概多高。",
+    "体重": "问体重大概多少。不要写成填表。",
 }
 
 
@@ -59,7 +65,7 @@ def _already_asked(history: list[dict[str, str]], key: str) -> bool:
 
 
 def missing_identity(archive: list[dict[str, str]] | None, history: list[dict[str, str]]) -> list[str]:
-    """按年级、姓名、年龄的顺序，列出还没有、也还没问过的身份。"""
+    """按年级、姓名、年龄、性别、身高、体重的顺序，列出还没有、也还没问过的身份。"""
     known = {
         fact["key"]
         for fact in archive or []
@@ -69,13 +75,13 @@ def missing_identity(archive: list[dict[str, str]] | None, history: list[dict[st
 
 
 def identity_note(archive: list[dict[str, str]] | None, history: list[dict[str, str]]) -> str:
-    """前三轮里每轮最多准备一件还没问过的身份。过了三轮，或要问的都问过了，就不再问。"""
+    """前五轮里每轮最多准备一件还没问过的身份。过了这几轮，或要问的都问过了，就不再问。"""
     rounds = sum(1 for message in history if message.get("role") == "user")
     pending = missing_identity(archive, history)
     if rounds < 1 or rounds > IDENTITY_ASK_ROUNDS or not pending:
         return IDENTITY_DONE_PROMPT
     item = pending[0]
-    return IDENTITY_ASK_PROMPT.format(round=rounds, item=item, how=_ASK_HOW[item])
+    return IDENTITY_ASK_PROMPT.format(round=rounds, limit=IDENTITY_ASK_ROUNDS, item=item, how=_ASK_HOW[item])
 
 
 def greeting_identity_note(archive: list[dict[str, str]] | None) -> str:
@@ -117,9 +123,6 @@ def tutor_messages(
         parts.append(f"{SNAPSHOT_PROMPT}\n{_fact_lines(facts)}")
     if archive is not None:
         parts.append(f"{ARCHIVE_PROMPT}\n{_fact_lines(archive)}")
-    # 身份有缺时才在前三轮末尾轻轻问一件。不问的时候也写明，避免模型自己开始盘问。
-    if identity_note:
-        parts.append(identity_note)
     # 检索结果放在最后，避免家教按默认讲法把多道题展开。
     if mistake_note:
         parts.append(mistake_note)
@@ -129,4 +132,7 @@ def tutor_messages(
     # 周计划还在后台排。这一轮只说稍后补一句，不把还没排好的安排说出来。
     if job_note:
         parts.append(job_note)
+    # 放在最后。问的时候不会被讲法盖住；不问的时候也不会被讲题带去再问一遍。
+    if identity_note:
+        parts.append(identity_note)
     return [{"role": "system", "content": "\n\n".join(parts)}, *recent_rounds(history)]
