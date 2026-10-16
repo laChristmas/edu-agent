@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import tomllib
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -21,6 +22,8 @@ REVIEW_PROMPT = str(_RULES["review_prompt"]).strip()
 REVISE_PROMPT = str(_RULES["revise_prompt"]).strip()
 REASONS = {"计算", "检查"}
 VERDICTS = {"通过", "有误", "看不出"}
+# 句子里已经有方程时不再问模型。照抄一段写错的过程会被看成「不是在做题」，关键步骤就漏过去了。
+_EQUATION = re.compile(r"\d*\s*[A-Za-z]\s*(?:[+\-*/×÷]\s*\d*\s*[A-Za-z0-9]*)*\s*[=＝]\s*-?\d")
 
 
 class CheckOpinion:
@@ -45,6 +48,8 @@ async def preview_reason(
         return None
     if _asked(question):
         return "检查"
+    if _EQUATION.search(question):
+        return "计算"
     return await _decide(client, settings, question)
 
 
