@@ -33,7 +33,7 @@ type ChatMessage = {
 };
 
 type ChatEvent = {
-  type: "conversation" | "delta" | "done" | "error";
+  type: "conversation" | "delta" | "done" | "error" | "later";
   id?: string;
   text?: string;
   detail?: string;
@@ -52,6 +52,8 @@ export default function ChatPage() {
   const [photoUrl, setPhotoUrl] = useState<string | null>(null);
   const resizeDrag = useRef<{ y: number; height: number } | null>(null);
   const messagesRef = useRef<HTMLDivElement>(null);
+  const shownRef = useRef(messages);
+  shownRef.current = messages;
   const fileRef = useRef<HTMLInputElement>(null);
   const dragDepth = useRef(0);
   const [dragging, setDragging] = useState(false);
@@ -266,6 +268,7 @@ export default function ChatPage() {
     setSending(true);
     let imageId: string | null = null;
     let nextConversation = conversationId;
+    let waitForLater = false;
     try {
       if (chosen) {
         const form = new FormData();
@@ -331,6 +334,9 @@ export default function ChatPage() {
           const payload = JSON.parse(line.slice(5).trim()) as ChatEvent;
           if (payload.type === "conversation" && payload.id) {
             rememberConversation(payload.id);
+            nextConversation = payload.id;
+          } else if (payload.type === "later") {
+            waitForLater = true;
           } else if (payload.type === "delta" && payload.text) {
             const text = payload.text;
             setMessages((current) => {
@@ -351,6 +357,46 @@ export default function ChatPage() {
       setError("连接中断");
     } finally {
       setSending(false);
+      if (waitForLater && nextConversation) {
+        void watchFollowUp(nextConversation);
+      }
+    }
+  }
+
+  async function watchFollowUp(conversation: string) {
+    // 周计划排完才补一句。流已经结束，这里只把后补的那句接上，不挡住下一轮。
+    const started = Date.now();
+    while (Date.now() - started < 45000) {
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      try {
+        const response = await fetch(`${API_BASE}/conversations/${conversation}/messages`);
+        if (!response.ok) {
+          continue;
+        }
+        const body = (await response.json()) as { messages: ChatMessage[] };
+        const known = new Set(
+          shownRef.current.filter((item) => item.role === "assistant").map((item) => item.content),
+        );
+        const extra = body.messages.filter(
+          (item) => item.role === "assistant" && item.content && !known.has(item.content),
+        );
+        if (!extra.length) {
+          continue;
+        }
+        setMessages((current) => {
+          const have = new Set(
+            current.filter((item) => item.role === "assistant").map((item) => item.content),
+          );
+          const fresh = extra.filter((item) => !have.has(item.content));
+          if (!fresh.length) {
+            return current;
+          }
+          return [...current, ...fresh.map((item) => ({ role: "assistant" as const, content: item.content }))];
+        });
+        return;
+      } catch {
+        // 接口重启时继续等，后补的那句还在原来的会话里。
+      }
     }
   }
 

@@ -28,6 +28,7 @@ from app.config import get_settings
 from app.daily import open_briefing
 from app.db import LOCAL_USER_ID, create_pool, ensure_schema, pgvector_version
 from app.extract import extract_turn
+from app.jobs import prepare_weekly, reclaim_weekly_plans, serve_weekly_plans
 from app.images import (
     PHOTO_AUTO_NOTE,
     PHOTO_GRADE,
@@ -61,9 +62,20 @@ async def lifespan(app: FastAPI):
     await ensure_schema(app.state.pool)
     # 读超时放宽，流式回复可能持续较久。
     app.state.http = httpx.AsyncClient(timeout=httpx.Timeout(10.0, read=180.0))
+    await reclaim_weekly_plans(app.state.pool)
+    stop_jobs = asyncio.Event()
+    job_worker = asyncio.create_task(
+        serve_weekly_plans(app.state.pool, app.state.http, settings, stop_jobs)
+    )
     try:
         yield
     finally:
+        stop_jobs.set()
+        job_worker.cancel()
+        try:
+            await job_worker
+        except asyncio.CancelledError:
+            pass
         await app.state.http.aclose()
         await app.state.pool.close()
 
@@ -397,6 +409,12 @@ async def chat(body: ChatIn):
 
         try:
             user_message_id = await save_message(pool, conversation_id, "user", body.content)
+            job_note, job_queued = await prepare_weekly(
+                pool,
+                user_id=LOCAL_USER_ID,
+                conversation_id=conversation_id,
+                user_text=body.content,
+            )
             # 要不要复核只看学生这句话，可以和后面的讲解一起进行。
             decide_task = asyncio.create_task(preview_reason(app.state.http, settings, body.content))
             if body.image_id is not None:
@@ -428,6 +446,9 @@ async def chat(body: ChatIn):
                     logger.exception("照片识题失败")
                     photo_reading = None
             yield sse({"type": "conversation", "id": str(conversation_id)})
+            if job_queued:
+                # 页面据此等后补的那一句。学生看不到这个事件。
+                yield sse({"type": "later"})
             facts = await teaching_facts(pool, LOCAL_USER_ID)
             archive = await active_facts(pool, LOCAL_USER_ID)
             ask_grade = not any(fact["dimension"] == "身份" and fact["key"] == "年级" for fact in archive)
@@ -465,6 +486,7 @@ async def chat(body: ChatIn):
                 ask_grade=ask_grade,
                 mistake_note=mistake_note,
                 web_note=web_note,
+                job_note=job_note,
             )
             if photo is not None and photo_reading is not None:
                 messages = _with_photo(messages, photo[1], photo[0])

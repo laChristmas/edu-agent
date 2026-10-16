@@ -272,6 +272,32 @@ async def ensure_schema(pool: asyncpg.Pool) -> None:
         await connection.execute(
             "ALTER TABLE solution_checks ADD COLUMN IF NOT EXISTS revision text"
         )
+        # 周计划要活过进程重启。抽取、向量和简报仍不进这张表。
+        await connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS jobs (
+                id uuid PRIMARY KEY,
+                user_id uuid NOT NULL REFERENCES users (id),
+                conversation_id uuid NOT NULL REFERENCES conversations (id) ON DELETE CASCADE,
+                kind text NOT NULL CHECK (kind IN ('周计划')),
+                status text NOT NULL CHECK (status IN ('待做', '进行中', '完成', '失败')),
+                step integer NOT NULL DEFAULT 0 CHECK (step >= 0),
+                payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+                result text,
+                message_id uuid REFERENCES messages (id) ON DELETE SET NULL,
+                claimed_at timestamptz,
+                created_at timestamptz NOT NULL DEFAULT now(),
+                finished_at timestamptz
+            )
+            """
+        )
+        await connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS jobs_claim_idx
+            ON jobs (created_at)
+            WHERE status IN ('待做', '进行中')
+            """
+        )
 
 
 async def create_pool(settings: Settings) -> asyncpg.Pool:

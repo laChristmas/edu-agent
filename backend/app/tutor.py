@@ -36,6 +36,7 @@ def tutor_messages(
     ask_grade: bool = False,
     mistake_note: str | None = None,
     web_note: str | None = None,
+    job_note: str | None = None,
 ) -> list[dict[str, str]]:
     """家教提示放在最前，并附上讲法画像和可口述的档案。这段提示不写入会话表。"""
     parts = [TUTOR_PROMPT]
@@ -50,4 +51,7 @@ def tutor_messages(
     # 没有时效问题时不附。材料只约束会过时的事实，不改讲题。
     if web_note:
         parts.append(web_note)
+    # 周计划还在后台排。这一轮只说稍后补一句，不把还没排好的安排说出来。
+    if job_note:
+        parts.append(job_note)
     return [{"role": "system", "content": "\n\n".join(parts)}, *recent_rounds(history)]
