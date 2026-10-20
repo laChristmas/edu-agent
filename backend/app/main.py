@@ -150,10 +150,10 @@ def _with_photo(messages: list[dict], media_type: str, data: bytes) -> list[dict
     return updated
 
 
-# 聊天页在另一个端口，只放开本机开发地址。
+# 聊天页在另一个端口。3000 被系统占用时会改端口，所以本机任意端口都放开。
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://127.0.0.1:3000", "http://localhost:3000"],
+    allow_origin_regex=r"http://(127\.0\.0\.1|localhost):\d+",
     allow_methods=["GET", "POST"],
     allow_headers=["Content-Type"],
 )
