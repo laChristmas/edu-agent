@@ -141,6 +141,11 @@ async def ensure_schema(pool: asyncpg.Pool) -> None:
     async with pool.acquire() as connection:
         await connection.execute(SCHEMA)
         await connection.execute(MISTAKE_SCHEMA)
+        # 摘要覆盖到这条消息为止。不设外键，删消息时不必先解开会话。
+        await connection.execute("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS summary text")
+        await connection.execute(
+            "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS summary_message_id uuid"
+        )
         # 已有库补上考试日期，并把「已结束」放进状态约束。
         await connection.execute("ALTER TABLE profile_facts ADD COLUMN IF NOT EXISTS ends_on date")
         await connection.execute(

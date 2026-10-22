@@ -6,7 +6,6 @@ _CONFIG_PATH = Path(__file__).resolve().parents[1] / "config.toml"
 with _CONFIG_PATH.open("rb") as config_file:
     _RULES = tomllib.load(config_file)
 
-RECENT_ROUNDS = int(_RULES["recent_rounds"])
 TUTOR_PROMPT = str(_RULES["tutor_prompt"]).strip()
 SNAPSHOT_PROMPT = str(_RULES["snapshot_prompt"]).strip()
 ARCHIVE_PROMPT = str(_RULES["archive_prompt"]).strip()
@@ -18,14 +17,6 @@ _DAILY = _RULES["daily"]
 GREETING_ASK_PROMPT = str(_DAILY["greeting_ask_prompt"]).strip()
 GREETING_KNOWN_PROMPT = str(_DAILY["greeting_known_prompt"]).strip()
 GREETING_ASK_LINES = {str(key): str(value) for key, value in _DAILY["greeting_ask_lines"].items()}
-
-
-def recent_rounds(messages: list[dict[str, str]], limit: int = RECENT_ROUNDS) -> list[dict[str, str]]:
-    """保留最近若干轮。一轮从一条用户消息算起，包含它后面的助手回复。"""
-    user_indexes = [index for index, message in enumerate(messages) if message["role"] == "user"]
-    if len(user_indexes) <= limit:
-        return messages
-    return messages[user_indexes[-limit] :]
 
 
 def _fact_lines(facts: list[dict[str, str]]) -> str:
@@ -116,6 +107,7 @@ def tutor_messages(
     mistake_note: str | None = None,
     web_note: str | None = None,
     job_note: str | None = None,
+    summary_note: str | None = None,
 ) -> list[dict[str, str]]:
     """家教提示放在最前，并附上讲法画像和可口述的档案。这段提示不写入会话表。"""
     parts = [TUTOR_PROMPT]
@@ -132,7 +124,10 @@ def tutor_messages(
     # 周计划还在后台排。这一轮只说稍后补一句，不把还没排好的安排说出来。
     if job_note:
         parts.append(job_note)
+    # 摘要紧挨着还没压缩的轮次。身份追问仍放在最后，避免被讲法盖住。
+    if summary_note:
+        parts.append(summary_note)
     # 放在最后。问的时候不会被讲法盖住；不问的时候也不会被讲题带去再问一遍。
     if identity_note:
         parts.append(identity_note)
-    return [{"role": "system", "content": "\n\n".join(parts)}, *recent_rounds(history)]
+    return [{"role": "system", "content": "\n\n".join(parts)}, *history]

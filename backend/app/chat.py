@@ -89,7 +89,7 @@ async def append_message(pool: asyncpg.Pool, message_id: UUID, extra: str) -> No
 
 
 async def load_messages(pool: asyncpg.Pool, conversation_id: UUID) -> list[dict[str, str]]:
-    """按时间读出本会话已落库的消息。截断最近 12 轮在送给模型时做。"""
+    """按时间读出本会话已落库的消息。送给模型时再换成摘要加未满的轮次。"""
     async with pool.acquire() as connection:
         rows = await connection.fetch(
             """

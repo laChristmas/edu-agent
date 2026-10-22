@@ -47,6 +47,7 @@ from app.images import (
 from app.memory import active_facts, confirm_facts, list_profile, teaching_facts
 from app.mistakes import PhotoReading, list_mistakes, read_photo, record_turn
 from app.search import prepare_mistake_lookup
+from app.summary import compress_context, prompt_history
 from app.web import prepare_web_lookup
 
 logger = logging.getLogger("eduagent")
@@ -377,6 +378,11 @@ async def chat(body: ChatIn):
                         assistant_text="".join(parts),
                     )
                 )
+            try:
+                # 这一轮若刚好满十轮，先压好，下一句才能用上新摘要。
+                await compress_context(pool, app.state.http, settings, conversation_id)
+            except Exception:
+                logger.exception("对话压缩失败")
             await end_turn(conversation_id)
             # 画像和错题在回复落库之后另起任务，不占这条流式连接。
             if user_message_id is not None and parts:
@@ -452,6 +458,7 @@ async def chat(body: ChatIn):
             facts = await teaching_facts(pool, LOCAL_USER_ID)
             archive = await active_facts(pool, LOCAL_USER_ID)
             history = await load_messages(pool, conversation_id)
+            summary_note, spoken_history = await prompt_history(pool, conversation_id)
             mistake_note = None
             try:
                 # 像在找错题时才检索。失败就照常讲，不挡住这一轮。
@@ -480,13 +487,14 @@ async def chat(body: ChatIn):
                 photo_note = _photo_note(photo_reading, photo_only=body.content == "（一张照片）")
                 mistake_note = f"{mistake_note}\n\n{photo_note}" if mistake_note else photo_note
             messages = tutor_messages(
-                history,
+                spoken_history,
                 facts,
                 archive,
                 identity_note=identity_note(archive, history),
                 mistake_note=mistake_note,
                 web_note=web_note,
                 job_note=job_note,
+                summary_note=summary_note,
             )
             if photo is not None and photo_reading is not None:
                 messages = _with_photo(messages, photo[1], photo[0])
@@ -510,6 +518,11 @@ async def chat(body: ChatIn):
                     except Exception:
                         logger.exception("复核交回失败")
                         handed = True
+            try:
+                # 回复已经落库。满十轮就在这一轮结束前压好，下一句不用再带上原文。
+                await compress_context(pool, app.state.http, settings, conversation_id)
+            except Exception:
+                logger.exception("对话压缩失败")
             yield sse({"type": "done"})
         finally:
             if handoff_task is None and decide_task is not None and not decide_task.done():
